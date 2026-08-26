@@ -3,9 +3,10 @@ import { ScanPanel } from './components/ScanPanel'
 import { DuplicatesPanel } from './components/DuplicatesPanel'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { RenamingPanel } from './components/RenamingPanel'
+import { MediaPanel } from './components/MediaPanel'
 import { DuplicatesResponse, ScanStatus } from './types'
 
-type View = 'scan' | 'duplicates' | 'analysis' | 'renaming'
+type View = 'scan' | 'duplicates' | 'media' | 'analysis' | 'renaming'
 
 function App() {
   const [currentView, setCurrentView] = useState<View>('scan')
@@ -42,6 +43,12 @@ function App() {
               )}
             </li>
             <li
+              className={currentView === 'media' ? 'active' : ''}
+              onClick={() => setCurrentView('media')}
+            >
+              Media Intelligence
+            </li>
+            <li
               className={currentView === 'analysis' ? 'active' : ''}
               onClick={() => setCurrentView('analysis')}
             >
@@ -74,6 +81,7 @@ function App() {
               scanId={scanResult?.scan_id || null}
             />
           )}
+          {currentView === 'media' && <MediaPanel />}
           {currentView === 'analysis' && <AnalysisPanel />}
           {currentView === 'renaming' && <RenamingPanel />}
         </main>
