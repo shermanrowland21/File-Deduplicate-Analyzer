@@ -10,3 +10,5 @@ aiofiles==23.2.1
 watchdog==3.0.0
 scenedetect==0.7.1
 opencv-python-headless==4.10.0.84
+numpy>=1.26.0
+faiss-cpu>=1.7.4

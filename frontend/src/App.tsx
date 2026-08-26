@@ -4,9 +4,10 @@ import { DuplicatesPanel } from './components/DuplicatesPanel'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { RenamingPanel } from './components/RenamingPanel'
 import { MediaPanel } from './components/MediaPanel'
+import { VisualSearchPanel } from './components/VisualSearchPanel'
 import { DuplicatesResponse, ScanStatus } from './types'
 
-type View = 'scan' | 'duplicates' | 'media' | 'analysis' | 'renaming'
+type View = 'scan' | 'duplicates' | 'media' | 'visual' | 'analysis' | 'renaming'
 
 function App() {
   const [currentView, setCurrentView] = useState<View>('scan')
@@ -49,6 +50,12 @@ function App() {
               Media Intelligence
             </li>
             <li
+              className={currentView === 'visual' ? 'active' : ''}
+              onClick={() => setCurrentView('visual')}
+            >
+              Visual Search
+            </li>
+            <li
               className={currentView === 'analysis' ? 'active' : ''}
               onClick={() => setCurrentView('analysis')}
             >
@@ -82,6 +89,7 @@ function App() {
             />
           )}
           {currentView === 'media' && <MediaPanel />}
+          {currentView === 'visual' && <VisualSearchPanel />}
           {currentView === 'analysis' && <AnalysisPanel />}
           {currentView === 'renaming' && <RenamingPanel />}
         </main>
