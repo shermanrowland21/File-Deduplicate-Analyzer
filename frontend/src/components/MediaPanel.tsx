@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { DirectoryBrowser } from './DirectoryBrowser'
+import { MediaSearchPanel } from './MediaSearchPanel'
 
 interface PipelineJob {
   status: string
@@ -18,14 +19,6 @@ interface PipelineJob {
   transcription_note?: string
 }
 
-interface SearchResult {
-  query: string
-  transcript_hits: any[]
-  topic_hits: any[]
-  visual_hits: any[]
-  total_hits: number
-}
-
 export function MediaPanel() {
   const [tab, setTab] = useState<'analyze' | 'search' | 'library'>('analyze')
   const [filePath, setFilePath] = useState('')
@@ -41,10 +34,7 @@ export function MediaPanel() {
   const [doTopics, setDoTopics] = useState(true)
   const [frameInterval, setFrameInterval] = useState(30)
 
-  // Search
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchResults, setSearchResults] = useState<SearchResult | null>(null)
-  const [searching, setSearching] = useState(false)
+  // Search — handled by MediaSearchPanel component
 
   // Library
   const [analyzedFiles, setAnalyzedFiles] = useState<any[]>([])
@@ -125,23 +115,6 @@ export function MediaPanel() {
     }
     pollRef.current = window.setInterval(poll, 1000)
     poll()
-  }
-
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return
-    setSearching(true)
-    setSearchResults(null)
-    try {
-      const res = await fetch(`/api/media/search?q=${encodeURIComponent(searchQuery.trim())}&limit=50`)
-      if (res.ok) {
-        const data = await res.json()
-        setSearchResults(data)
-      }
-    } catch (err: any) {
-      setError(err.message)
-    } finally {
-      setSearching(false)
-    }
   }
 
   const loadFileAnalysis = async (filePath: string) => {
@@ -361,119 +334,7 @@ export function MediaPanel() {
       )}
 
       {/* SEARCH TAB */}
-      {tab === 'search' && (
-        <div>
-          <div className="card">
-            <div className="card-header">
-              <h2>Search Media Content</h2>
-            </div>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: 16 }}>
-              Search across all analyzed media — transcripts, topics, keywords, and visual descriptions.
-              Find the exact moment in a video where something is discussed.
-            </p>
-
-            <div className="form-group">
-              <label>Search Query</label>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="e.g. supply chain, product demo, quarterly results..."
-                  onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                  style={{ flex: 1 }}
-                />
-                <button className="btn btn-primary" onClick={handleSearch} disabled={searching}>
-                  {searching ? <span className="spinner" /> : 'Search'}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Search Results */}
-          {searchResults && (
-            <div className="card">
-              <div className="card-header">
-                <h3>Results for "{searchResults.query}"</h3>
-                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                  {searchResults.total_hits} hits
-                </span>
-              </div>
-
-              {searchResults.total_hits === 0 && (
-                <div className="empty-state" style={{ padding: 24 }}>
-                  <p>No results found. Try different keywords or analyze more files.</p>
-                </div>
-              )}
-
-              {/* Transcript Hits */}
-              {searchResults.transcript_hits.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: 8 }}>
-                    Speech / Transcript ({searchResults.transcript_hits.length})
-                  </h4>
-                  {searchResults.transcript_hits.map((hit, idx) => (
-                    <div key={idx} className="search-hit">
-                      <div className="search-hit-header">
-                        <span className="search-hit-file">{hit.filename}</span>
-                        <span className="search-hit-time">
-                          {formatTime(hit.start_time)} — {formatTime(hit.end_time)}
-                        </span>
-                      </div>
-                      <div className="search-hit-text">{hit.text}</div>
-                      <div className="search-hit-path">{hit.file_path}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Topic Hits */}
-              {searchResults.topic_hits.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: 8 }}>
-                    Topics & Keywords ({searchResults.topic_hits.length})
-                  </h4>
-                  {searchResults.topic_hits.map((hit, idx) => (
-                    <div key={idx} className="search-hit">
-                      <div className="search-hit-header">
-                        <span className="search-hit-file">{hit.filename}</span>
-                        {hit.start_time != null && (
-                          <span className="search-hit-time">
-                            {formatTime(hit.start_time)} — {formatTime(hit.end_time)}
-                          </span>
-                        )}
-                      </div>
-                      <div className="search-hit-text">
-                        <span className="tag" style={{ marginRight: 8 }}>{hit.topic}</span>
-                      </div>
-                      <div className="search-hit-path">{hit.file_path}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Visual Hits */}
-              {searchResults.visual_hits.length > 0 && (
-                <div>
-                  <h4 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: 8 }}>
-                    Visual / OCR ({searchResults.visual_hits.length})
-                  </h4>
-                  {searchResults.visual_hits.map((hit, idx) => (
-                    <div key={idx} className="search-hit">
-                      <div className="search-hit-header">
-                        <span className="search-hit-file">{hit.filename}</span>
-                        <span className="search-hit-time">{formatTime(hit.timestamp)}</span>
-                      </div>
-                      <div className="search-hit-text">{hit.description || hit.ocr_text}</div>
-                      <div className="search-hit-path">{hit.file_path}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+      {tab === 'search' && <MediaSearchPanel />}
 
       {/* LIBRARY TAB */}
       {tab === 'library' && (
