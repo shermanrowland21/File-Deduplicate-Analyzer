@@ -1,18 +1,35 @@
 """
-Media analysis router - pipeline control, search, and metadata access.
+Media analysis router - pipeline control, search, clip extraction, and metadata access.
 """
+import os
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 
 from ..services.media.pipeline import analyze_media_file, get_job_status
 from ..services.media import metadata_store
+from ..services.media.scene_detect import detect_scenes, generate_storyboard
+from ..services.media.clip_extractor import extract_clip, extract_clips_batch
 
 router = APIRouter()
 
 
 class AnalyzeMediaRequest(BaseModel):
     file_path: str
+    transcribe: bool = True
+    visual: bool = True
+    topics: bool = True
+    frame_interval: int = 30
+    max_frames: int = 60
+    visual_model: Optional[str] = None
+    topic_model: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
+
+
+class BatchAnalyzeRequest(BaseModel):
+    paths: list[str]  # files or directories
+    recursive: bool = True
+    file_extensions: Optional[list[str]] = None  # filter, e.g. ["mp4", "avi", "mov", "mkv", "mp3", "wav"]
     transcribe: bool = True
     visual: bool = True
     topics: bool = True
@@ -108,3 +125,158 @@ async def get_transcript(file_path: str = Query(...)):
         "segments": segments,
         "total_segments": len(segments),
     }
+
+# --- Scene Detection & Storyboard ---
+
+class SceneDetectRequest(BaseModel):
+    file_path: str
+    method: str = "adaptive"  # adaptive, content, threshold
+    threshold: Optional[float] = None
+    min_scene_length_sec: float = 2.0
+    max_scene_gap_sec: float = 120.0
+    generate_thumbnails: bool = True
+    thumbnail_width: int = 320
+
+
+@router.post("/scenes")
+async def detect_video_scenes(request: SceneDetectRequest):
+    """
+    Detect scene boundaries in a video and generate storyboard thumbnails.
+    Returns a list of scenes with timestamps and thumbnail paths.
+    """
+    if not os.path.exists(request.file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+
+    try:
+        scenes = detect_scenes(
+            video_path=request.file_path,
+            method=request.method,
+            threshold=request.threshold,
+            min_scene_length_sec=request.min_scene_length_sec,
+            max_scene_gap_sec=request.max_scene_gap_sec,
+        )
+
+        if request.generate_thumbnails:
+            scenes = generate_storyboard(
+                video_path=request.file_path,
+                scenes=scenes,
+                thumbnail_width=request.thumbnail_width,
+            )
+
+        return {
+            "file_path": request.file_path,
+            "total_scenes": len(scenes),
+            "scenes": scenes,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scene detection failed: {str(e)}")
+
+
+@router.get("/thumbnail")
+async def get_thumbnail(path: str = Query(...)):
+    """Serve a scene thumbnail image."""
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+# --- Clip Extraction ---
+
+class ClipRequest(BaseModel):
+    source_path: str
+    start_time: float  # seconds
+    end_time: float  # seconds
+    output_dir: Optional[str] = None
+    output_format: Optional[str] = None  # mp4, mov, mkv
+    include_audio: bool = True
+
+
+class BatchClipRequest(BaseModel):
+    source_path: str
+    clips: list[dict]  # each: {start_time, end_time, name (optional)}
+    output_dir: Optional[str] = None
+
+
+@router.post("/extract-clip")
+async def extract_video_clip(request: ClipRequest):
+    """
+    Extract a clip from a source video. LOSSLESS — no re-encoding.
+    Original quality preserved: resolution, codec, color space, bitrate.
+    Output is ready for Premiere Pro / DaVinci Resolve / Final Cut.
+
+    Extraction takes seconds regardless of clip length.
+    """
+    if not os.path.exists(request.source_path):
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    if request.start_time >= request.end_time:
+        raise HTTPException(status_code=400, detail="start_time must be less than end_time")
+
+    result = extract_clip(
+        source_path=request.source_path,
+        start_time=request.start_time,
+        end_time=request.end_time,
+        output_dir=request.output_dir,
+        output_format=request.output_format,
+        include_audio=request.include_audio,
+    )
+
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Extraction failed"))
+
+    return result
+
+
+@router.post("/extract-clips-batch")
+async def extract_clips_batch_endpoint(request: BatchClipRequest):
+    """
+    Extract multiple clips from the same source video.
+    All clips are lossless stream copies — full resolution, Premiere-ready.
+    """
+    if not os.path.exists(request.source_path):
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    results = extract_clips_batch(
+        source_path=request.source_path,
+        clips=request.clips,
+        output_dir=request.output_dir,
+    )
+
+    successful = [r for r in results if r.get("success")]
+    failed = [r for r in results if not r.get("success")]
+
+    return {
+        "source_path": request.source_path,
+        "total_clips": len(request.clips),
+        "successful": len(successful),
+        "failed": len(failed),
+        "clips": results,
+    }
+
+
+@router.get("/download-clip")
+async def download_clip(path: str = Query(...)):
+    """
+    Download an extracted clip file.
+    Returns the file with proper content type for direct download.
+    """
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Clip file not found")
+
+    filename = os.path.basename(path)
+    ext = os.path.splitext(filename)[1].lower()
+    media_types = {
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo",
+        ".webm": "video/webm",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
