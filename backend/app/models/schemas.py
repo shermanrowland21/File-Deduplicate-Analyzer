@@ -7,7 +7,8 @@ from enum import Enum
 
 
 class ScanRequest(BaseModel):
-    directory: str
+    directory: Optional[str] = None  # single directory (legacy)
+    directories: Optional[list[str]] = None  # multiple directories
     recursive: bool = True
     include_hidden: bool = False
     min_file_size: int = 0  # bytes

@@ -25,6 +25,7 @@ interface ScanProgress {
 
 export function ScanPanel({ onScanComplete }: ScanPanelProps) {
   const [directory, setDirectory] = useState('')
+  const [directories, setDirectories] = useState<string[]>([])
   const [recursive, setRecursive] = useState(true)
   const [includeHidden, setIncludeHidden] = useState(false)
   const [minSize, setMinSize] = useState('0')
@@ -75,8 +76,12 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
   }, [stopPolling, onScanComplete])
 
   const handleScan = async () => {
-    if (!directory.trim()) {
-      setError('Please enter a directory path')
+    const allDirs = [...directories]
+    if (directory.trim()) {
+      allDirs.push(directory.trim())
+    }
+    if (allDirs.length === 0) {
+      setError('Please add at least one directory')
       return
     }
 
@@ -100,7 +105,22 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
         options.file_extensions = extensions.split(',').map((e: string) => e.trim())
       }
 
-      const status = await api.scanDirectory(directory.trim(), options)
+      // Send as directories array
+      const body = {
+        directories: allDirs,
+        ...options,
+      }
+
+      const response = await fetch('/api/scanner/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!response.ok) {
+        const err = await response.json()
+        throw new Error(err.detail || `HTTP ${response.status}`)
+      }
+      const status = await response.json()
       setProgress(status)
 
       if (status.status === 'running') {
@@ -154,16 +174,57 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
         {error && <div className="alert alert-error">{error}</div>}
 
         <div className="form-group">
-          <label>Directory Path</label>
+          <label>Directories to Scan</label>
+          {directories.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              {directories.map((dir, idx) => (
+                <div key={idx} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4,
+                  background: 'var(--bg-tertiary)', padding: '6px 12px', borderRadius: 6,
+                  fontSize: '0.85rem', fontFamily: 'monospace',
+                }}>
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {dir}
+                  </span>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setDirectories(directories.filter((_, i) => i !== idx))}
+                    style={{ padding: '2px 8px', fontSize: '0.7rem' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               type="text"
               value={directory}
               onChange={(e) => setDirectory(e.target.value)}
-              placeholder="C:\Users\username\Documents or /home/user/files"
-              onKeyDown={(e) => e.key === 'Enter' && handleScan()}
+              placeholder={directories.length > 0 ? "Add another directory..." : "E:/Dropbox-Snapshot"}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && directory.trim()) {
+                  e.preventDefault()
+                  setDirectories([...directories, directory.trim()])
+                  setDirectory('')
+                }
+              }}
               style={{ flex: 1 }}
             />
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                if (directory.trim()) {
+                  setDirectories([...directories, directory.trim()])
+                  setDirectory('')
+                }
+              }}
+              type="button"
+              disabled={!directory.trim()}
+            >
+              Add
+            </button>
             <button
               className="btn btn-secondary"
               onClick={() => setShowBrowser(true)}
@@ -172,6 +233,11 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
               Browse
             </button>
           </div>
+          {directories.length === 0 && (
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 4 }}>
+              Add one or more directories. Press Enter or click Add after each path.
+            </div>
+          )}
         </div>
 
         <div className="form-row">
@@ -354,7 +420,9 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
       {showBrowser && (
         <DirectoryBrowser
           onSelect={(path) => {
-            setDirectory(path)
+            if (!directories.includes(path)) {
+              setDirectories([...directories, path])
+            }
             setShowBrowser(false)
           }}
           onClose={() => setShowBrowser(false)}

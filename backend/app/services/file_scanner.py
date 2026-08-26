@@ -141,7 +141,7 @@ def _save_cache(directory: str, entries: dict):
 
 def _run_scan(
     scan_id: str,
-    directory: str,
+    directories: list[str],
     recursive: bool,
     include_hidden: bool,
     min_file_size: int,
@@ -149,27 +149,23 @@ def _run_scan(
     file_extensions: Optional[list[str]],
 ):
     """
-    Background scan worker. Processes files as they're discovered
-    so progress is visible immediately.
+    Background scan worker. Scans multiple directories, tags each file
+    with its source root and relative subfolder path.
     """
     scan = _scans[scan_id]
 
     try:
-        dir_path = Path(directory)
-        if not dir_path.exists():
-            scan["status"] = "error"
-            scan["error"] = f"Directory not found: {directory}"
-            return
-
-        if not dir_path.is_dir():
-            scan["status"] = "error"
-            scan["error"] = f"Path is not a directory: {directory}"
-            return
-
-        # Load cache for incremental scanning
-        cache = _load_cache(directory)
-        new_cache = {}
-        cache_hits = 0
+        # Validate all directories
+        for directory in directories:
+            dir_path = Path(directory)
+            if not dir_path.exists():
+                scan["status"] = "error"
+                scan["error"] = f"Directory not found: {directory}"
+                return
+            if not dir_path.is_dir():
+                scan["status"] = "error"
+                scan["error"] = f"Path is not a directory: {directory}"
+                return
 
         # Normalize extension filter once
         ext_filter = None
@@ -180,109 +176,127 @@ def _run_scan(
         processed = 0
         discovered = 0
 
-        # Single-pass: discover and hash files as we go
-        def walk_files():
-            """Generator that yields file paths as they're found."""
-            if recursive:
-                for root, dirs, files in os.walk(directory):
-                    if not include_hidden:
-                        dirs[:] = [d for d in dirs if not d.startswith(".")]
-                    for filename in files:
-                        if not include_hidden and filename.startswith("."):
-                            continue
-                        yield os.path.join(root, filename)
-            else:
-                for item in dir_path.iterdir():
-                    if item.is_file():
-                        if not include_hidden and item.name.startswith("."):
-                            continue
-                        yield str(item)
+        # Load caches for all directories
+        caches = {}
+        new_caches = {}
+        for directory in directories:
+            caches[directory] = _load_cache(directory)
+            new_caches[directory] = {}
 
-        for fp in walk_files():
-            discovered += 1
-            scan["discovered_files"] = discovered
+        cache_hits = 0
 
-            # Update current location every 50 files for performance
-            if discovered % 50 == 0:
-                scan["current_dir"] = os.path.dirname(fp).replace("\\", "/")
+        # Iterate through each source directory
+        for directory in directories:
+            dir_normalized = directory.replace("\\", "/").rstrip("/")
+            source_label = os.path.basename(dir_normalized)
+            cache = caches[directory]
 
-            try:
-                stat = os.stat(fp)
-                size = stat.st_size
-                mtime = stat.st_mtime
+            scan["current_source"] = source_label
 
-                # Apply filters
-                if size < min_file_size:
-                    continue
-                if max_file_size and size > max_file_size:
-                    continue
-                if ext_filter:
-                    ext = Path(fp).suffix.lower().lstrip(".")
-                    if ext not in ext_filter:
-                        continue
-
-                # Check cache: if size + mtime match, reuse hash
-                normalized_path = fp.replace("\\", "/")
-                cached = cache.get(normalized_path)
-                if cached and cached.get("size") == size and cached.get("mtime") == mtime:
-                    file_hash = cached["hash"]
-                    cache_hits += 1
+            def walk_files(d):
+                """Generator that yields file paths."""
+                if recursive:
+                    for root, dirs, files in os.walk(d):
+                        if not include_hidden:
+                            dirs[:] = [dd for dd in dirs if not dd.startswith(".")]
+                        for filename in files:
+                            if not include_hidden and filename.startswith("."):
+                                continue
+                            yield os.path.join(root, filename)
                 else:
-                    # Show what we're about to hash BEFORE starting
-                    scan["current_file"] = f"{os.path.basename(fp)} ({human_readable_size(size)})"
+                    for item in Path(d).iterdir():
+                        if item.is_file():
+                            if not include_hidden and item.name.startswith("."):
+                                continue
+                            yield str(item)
+
+            for fp in walk_files(directory):
+                discovered += 1
+                scan["discovered_files"] = discovered
+
+                if discovered % 50 == 0:
                     scan["current_dir"] = os.path.dirname(fp).replace("\\", "/")
-                    scan["hashing_size"] = size
 
-                    # Compute hash — smart strategy picks fast fingerprint for large files
-                    file_hash = smart_hash(fp, size)
-                    scan["hashing_size"] = 0
-                    if file_hash is None:
-                        processed += 1
-                        scan["processed_files"] = processed
+                try:
+                    stat = os.stat(fp)
+                    size = stat.st_size
+                    mtime = stat.st_mtime
+
+                    # Apply filters
+                    if size < min_file_size:
                         continue
+                    if max_file_size and size > max_file_size:
+                        continue
+                    if ext_filter:
+                        ext = Path(fp).suffix.lower().lstrip(".")
+                        if ext not in ext_filter:
+                            continue
 
-                # Update cache entry
-                new_cache[normalized_path] = {
-                    "hash": file_hash,
-                    "size": size,
-                    "mtime": mtime,
-                }
+                    # Check cache
+                    normalized_path = fp.replace("\\", "/")
+                    cached = cache.get(normalized_path)
+                    if cached and cached.get("size") == size and cached.get("mtime") == mtime:
+                        file_hash = cached["hash"]
+                        cache_hits += 1
+                    else:
+                        scan["current_file"] = f"{os.path.basename(fp)} ({human_readable_size(size)})"
+                        scan["current_dir"] = os.path.dirname(fp).replace("\\", "/")
+                        scan["hashing_size"] = size
 
-                # Update progress display
-                scan["current_file"] = os.path.basename(fp)
+                        file_hash = smart_hash(fp, size)
+                        scan["hashing_size"] = 0
+                        if file_hash is None:
+                            processed += 1
+                            scan["processed_files"] = processed
+                            continue
 
-                file_info = {
-                    "path": normalized_path,
-                    "filename": os.path.basename(fp),
-                    "extension": Path(fp).suffix.lower(),
-                    "size": size,
-                    "size_human": human_readable_size(size),
-                    "mime_type": get_mime_type(fp),
-                    "hash": file_hash,
-                    "modified_time": datetime.fromtimestamp(mtime).isoformat(),
-                    "created_time": datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                }
+                    # Update cache
+                    new_caches[directory][normalized_path] = {
+                        "hash": file_hash,
+                        "size": size,
+                        "mtime": mtime,
+                    }
 
-                # Group by hash
-                if file_hash not in scan["files"]:
-                    scan["files"][file_hash] = []
-                scan["files"][file_hash].append(file_info)
-                scan["all_files"].append(file_info)
+                    # Compute relative path within the source directory
+                    relative_path = os.path.relpath(fp, directory).replace("\\", "/")
+                    subfolder = os.path.dirname(relative_path).replace("\\", "/")
 
-                processed += 1
-                scan["processed_files"] = processed
-                scan["total_files"] = processed  # In streaming mode, total = processed so far
+                    scan["current_file"] = os.path.basename(fp)
 
-                # Update duplicate count periodically
-                if processed % 100 == 0:
-                    scan["duplicates_found"] = sum(
-                        len(files) - 1
-                        for files in scan["files"].values()
-                        if len(files) > 1
-                    )
+                    file_info = {
+                        "path": normalized_path,
+                        "filename": os.path.basename(fp),
+                        "extension": Path(fp).suffix.lower(),
+                        "size": size,
+                        "size_human": human_readable_size(size),
+                        "mime_type": get_mime_type(fp),
+                        "hash": file_hash,
+                        "modified_time": datetime.fromtimestamp(mtime).isoformat(),
+                        "created_time": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                        "source": source_label,
+                        "source_path": dir_normalized,
+                        "subfolder": subfolder,
+                    }
 
-            except (OSError, PermissionError):
-                continue
+                    # Group by hash
+                    if file_hash not in scan["files"]:
+                        scan["files"][file_hash] = []
+                    scan["files"][file_hash].append(file_info)
+                    scan["all_files"].append(file_info)
+
+                    processed += 1
+                    scan["processed_files"] = processed
+                    scan["total_files"] = processed
+
+                    if processed % 100 == 0:
+                        scan["duplicates_found"] = sum(
+                            len(files) - 1
+                            for files in scan["files"].values()
+                            if len(files) > 1
+                        )
+
+                except (OSError, PermissionError):
+                    continue
 
         # Final stats
         scan["duplicates_found"] = sum(
@@ -294,12 +308,14 @@ def _run_scan(
         scan["phase"] = "complete"
         scan["current_file"] = ""
         scan["current_dir"] = ""
+        scan["current_source"] = ""
         scan["cache_hits"] = cache_hits
         scan["status"] = "completed"
         scan["elapsed_seconds"] = round(time.time() - scan["started_at"], 1)
 
-        # Save cache for next time
-        _save_cache(directory, new_cache)
+        # Save caches for each directory
+        for directory in directories:
+            _save_cache(directory, new_caches[directory])
 
     except Exception as e:
         scan["status"] = "error"
@@ -307,7 +323,7 @@ def _run_scan(
 
 
 def scan_directory(
-    directory: str,
+    directories: list[str],
     recursive: bool = True,
     include_hidden: bool = False,
     min_file_size: int = 0,
@@ -315,13 +331,14 @@ def scan_directory(
     file_extensions: Optional[list[str]] = None,
 ) -> str:
     """
-    Start scanning a directory in the background.
+    Start scanning one or more directories in the background.
     Returns a scan_id immediately for polling progress.
     """
     scan_id = str(uuid.uuid4())
     _scans[scan_id] = {
         "status": "running",
-        "directory": directory,
+        "directories": directories,
+        "directory": ", ".join(os.path.basename(d.rstrip("/\\")) for d in directories),
         "total_files": 0,
         "discovered_files": 0,
         "processed_files": 0,
@@ -330,6 +347,7 @@ def scan_directory(
         "phase": "starting",
         "current_file": "",
         "current_dir": "",
+        "current_source": "",
         "hashing_size": 0,
         "elapsed_seconds": 0,
         "files": {},
@@ -339,7 +357,7 @@ def scan_directory(
 
     thread = threading.Thread(
         target=_run_scan,
-        args=(scan_id, directory, recursive, include_hidden, min_file_size, max_file_size, file_extensions),
+        args=(scan_id, directories, recursive, include_hidden, min_file_size, max_file_size, file_extensions),
         daemon=True,
     )
     thread.start()

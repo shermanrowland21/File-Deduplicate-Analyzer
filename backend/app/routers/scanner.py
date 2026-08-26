@@ -11,9 +11,18 @@ router = APIRouter()
 
 @router.post("/scan")
 async def start_scan(request: ScanRequest):
-    """Start scanning a directory for duplicate files. Returns immediately with scan_id."""
+    """Start scanning one or more directories for duplicate files. Returns immediately with scan_id."""
+    # Support both single directory and multiple directories
+    directories = []
+    if request.directories:
+        directories = request.directories
+    elif request.directory:
+        directories = [request.directory]
+    else:
+        raise HTTPException(status_code=400, detail="Provide 'directory' or 'directories'")
+
     scan_id = scan_directory(
-        directory=request.directory,
+        directories=directories,
         recursive=request.recursive,
         include_hidden=request.include_hidden,
         min_file_size=request.min_file_size,
