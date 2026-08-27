@@ -4,7 +4,7 @@ File Deduplicate Analyzer - Main FastAPI Application
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search
+from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search, archives
 
 app = FastAPI(
     title="File Deduplicate Analyzer",
@@ -28,6 +28,7 @@ app.include_router(models.router, prefix="/api/models", tags=["Models"])
 app.include_router(browser.router, prefix="/api/browser", tags=["Browser"])
 app.include_router(media.router, prefix="/api/media", tags=["Media Analysis"])
 app.include_router(visual_search.router, prefix="/api/visual", tags=["Visual Search"])
+app.include_router(archives.router, prefix="/api/archives", tags=["Archives"])
 
 
 @app.get("/api/health")

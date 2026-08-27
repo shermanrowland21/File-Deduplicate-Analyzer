@@ -5,9 +5,10 @@ import { AnalysisPanel } from './components/AnalysisPanel'
 import { RenamingPanel } from './components/RenamingPanel'
 import { MediaPanel } from './components/MediaPanel'
 import { VisualSearchPanel } from './components/VisualSearchPanel'
+import { ExtractPanel } from './components/ExtractPanel'
 import { DuplicatesResponse, ScanStatus } from './types'
 
-type View = 'scan' | 'duplicates' | 'media' | 'visual' | 'analysis' | 'renaming'
+type View = 'scan' | 'duplicates' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming'
 
 function App() {
   const [currentView, setCurrentView] = useState<View>('scan')
@@ -42,6 +43,12 @@ function App() {
                   ({duplicates.total_groups})
                 </span>
               )}
+            </li>
+            <li
+              className={currentView === 'extract' ? 'active' : ''}
+              onClick={() => setCurrentView('extract')}
+            >
+              Extract Archives
             </li>
             <li
               className={currentView === 'media' ? 'active' : ''}
@@ -88,6 +95,7 @@ function App() {
               scanId={scanResult?.scan_id || null}
             />
           )}
+          {currentView === 'extract' && <ExtractPanel />}
           {currentView === 'media' && <MediaPanel />}
           {currentView === 'visual' && <VisualSearchPanel />}
           {currentView === 'analysis' && <AnalysisPanel />}
