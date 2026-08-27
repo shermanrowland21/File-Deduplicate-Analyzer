@@ -61,10 +61,10 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
           } catch {
             onScanComplete(status as any, null)
           }
-        } else if (status.status === 'error') {
+        } else if (status.status === 'error' || status.status === 'cancelled') {
           stopPolling()
           setScanning(false)
-          setError(status.error || 'Scan failed')
+          if (status.status === 'error') setError(status.error || 'Scan failed')
         }
       } catch {
         // Keep polling
@@ -303,6 +303,21 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
             'Start Scan'
           )}
         </button>
+        {scanning && progress && (
+          <button
+            className="btn btn-danger"
+            onClick={async () => {
+              try {
+                await fetch(`/api/scanner/stop/${progress.scan_id}`, { method: 'POST' })
+                stopPolling()
+                setScanning(false)
+              } catch {}
+            }}
+            style={{ marginLeft: 8 }}
+          >
+            Stop Scan
+          </button>
+        )}
       </div>
 
       {/* Live Progress Panel */}
@@ -310,11 +325,12 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
         <div className="card">
           <div className="card-header">
             <h3>
-              {progress.status === 'completed' ? 'Scan Complete' : 'Scanning...'}
+              {progress.status === 'completed' ? 'Scan Complete' : progress.status === 'cancelled' ? 'Scan Stopped' : 'Scanning...'}
             </h3>
             <span style={{
               color: progress.status === 'completed' ? 'var(--success)' :
-                     progress.status === 'error' ? 'var(--danger)' : 'var(--accent)',
+                     progress.status === 'error' ? 'var(--danger)' :
+                     progress.status === 'cancelled' ? 'var(--warning)' : 'var(--accent)',
               fontSize: '0.85rem',
             }}>
               {progress.status === 'running' ? getPhaseLabel(progress.phase) : progress.status}

@@ -155,6 +155,11 @@ def _run_scan(
     scan = _scans[scan_id]
 
     try:
+        # Check for cancellation
+        if scan.get("cancelled"):
+            scan["status"] = "cancelled"
+            return
+
         # Validate all directories
         for directory in directories:
             dir_path = Path(directory)
@@ -211,6 +216,15 @@ def _run_scan(
                             yield str(item)
 
             for fp in walk_files(directory):
+                # Check for cancellation
+                if scan.get("cancelled"):
+                    scan["status"] = "cancelled"
+                    scan["phase"] = "cancelled"
+                    scan["elapsed_seconds"] = round(time.time() - scan["started_at"], 1)
+                    # Still save cache for what we've processed
+                    _save_cache(directory, new_caches[directory])
+                    return
+
                 discovered += 1
                 scan["discovered_files"] = discovered
 
@@ -363,6 +377,17 @@ def scan_directory(
     thread.start()
 
     return scan_id
+
+
+def cancel_scan(scan_id: str) -> bool:
+    """Cancel a running scan. Returns True if scan was running and is now cancelled."""
+    if scan_id not in _scans:
+        return False
+    scan = _scans[scan_id]
+    if scan["status"] != "running":
+        return False
+    scan["cancelled"] = True
+    return True
 
 
 def get_scan_status(scan_id: str) -> Optional[dict]:

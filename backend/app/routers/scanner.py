@@ -4,7 +4,7 @@ Scan runs in background; frontend polls /status/{scan_id} for progress.
 """
 from fastapi import APIRouter, HTTPException
 from ..models.schemas import ScanRequest
-from ..services.file_scanner import scan_directory, get_scan_status, get_cache_info, clear_cache
+from ..services.file_scanner import scan_directory, get_scan_status, get_cache_info, clear_cache, cancel_scan
 
 router = APIRouter()
 
@@ -60,3 +60,12 @@ async def delete_cache(directory: str):
     """Clear the scan cache for a directory (forces full rescan next time)."""
     cleared = clear_cache(directory)
     return {"cleared": cleared}
+
+
+@router.post("/stop/{scan_id}")
+async def stop_scan(scan_id: str):
+    """Stop a running scan. Results collected so far are preserved."""
+    cancelled = cancel_scan(scan_id)
+    if not cancelled:
+        raise HTTPException(status_code=400, detail="Scan not running or not found")
+    return {"cancelled": True, "scan_id": scan_id}
