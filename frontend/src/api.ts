@@ -1,4 +1,4 @@
-const API_BASE = '/api';
+import { API_BASE } from './config'
 
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {

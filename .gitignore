@@ -28,3 +28,39 @@ Thumbs.db
 
 # Dedup trash
 .file_dedup_trash/
+
+# Business data / secrets (do not publish)
+shared_drives.csv
+*.env
+
+# One-off diagnostic / scratch scripts (contain hardcoded local paths + emails)
+backend/analyze_loc2.py
+backend/apply_metadata_map.py
+backend/check_missing_accounts.py
+backend/count_shortcuts.py
+backend/dedup_dropbox_internal.py
+backend/dedup_videos.py
+backend/del_analyze.py
+backend/del_probe*.py
+backend/estimate_adds_size.py
+backend/make_it_only_report.py
+backend/make_resume_report.py
+backend/mk_test_add.py
+backend/peek_add.py
+backend/reconcile_breakdown.py
+backend/scan_docx_formatting.py
+backend/scan_metadata.py
+backend/summarize_delta.py
+backend/test_deletions.py
+backend/test_drivenames.py
+backend/test_gamcall.py
+backend/test_pathmap*.py
+backend/test_reconcile_it.py
+backend/verify_adds.py
+backend/verify_adds_it.py
+backend/verify_report_adds.py
+backend/verify_user_adds.py
+run_extraction.ps1
+
+# Local runtime data
+.file_dedup_analyzer/

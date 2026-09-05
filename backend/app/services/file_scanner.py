@@ -98,6 +98,87 @@ def smart_hash(file_path: str, file_size: int) -> Optional[str]:
         return compute_quick_fingerprint(file_path, file_size)
 
 
+def compute_md5(file_path: str, chunk_size: int = 1048576) -> Optional[str]:
+    """
+    Full-file MD5 hex digest. Needed to compare against Google Drive's
+    md5Checksum field (Drive only exposes MD5, not SHA-256).
+    """
+    md5 = hashlib.md5()
+    try:
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                md5.update(chunk)
+        return md5.hexdigest()
+    except (OSError, PermissionError):
+        return None
+
+
+def compute_hashes(file_path: str, file_size: int,
+                   want_md5: bool = True) -> dict:
+    """
+    Single-read hasher: computes the dedup smart-hash (full SHA-256 for <50MB,
+    256KB x3 fingerprint for >=50MB) AND the full-file MD5 in ONE pass over the
+    file's bytes. Reading is the expensive part; running two hashers over the
+    same bytes is nearly free.
+
+    Returns {"smart": <sha256-or-fingerprint>, "md5": <full-md5>, "size": <int>}.
+    Any hash that couldn't be computed is None.
+
+    Note: for files >=50MB the "smart" hash is the 256KB x3 fingerprint (matching
+    the existing dedup engine), while "md5" is always the FULL-file MD5 so it can
+    be compared to Google's whole-file checksum.
+    """
+    sha256 = hashlib.sha256()
+    md5 = hashlib.md5() if want_md5 else None
+    is_large = file_size >= LARGE_FILE_THRESHOLD
+
+    try:
+        if is_large:
+            # For the smart fingerprint we only sample 3 regions, but MD5 needs
+            # the whole file. Read the whole file once, feed MD5 every chunk and
+            # feed the fingerprint only the sampled ranges.
+            sha256.update(str(file_size).encode())
+            mid_start = max(0, file_size // 2 - SAMPLE_SIZE // 2)
+            last_start = max(0, file_size - SAMPLE_SIZE)
+            pos = 0
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(1048576)
+                    if not chunk:
+                        break
+                    if md5:
+                        md5.update(chunk)
+                    # feed fingerprint the bytes that fall in sampled windows
+                    cstart, cend = pos, pos + len(chunk)
+                    for ws in (0, mid_start, last_start):
+                        we = ws + SAMPLE_SIZE
+                        s = max(cstart, ws)
+                        e = min(cend, we)
+                        if s < e:
+                            sha256.update(chunk[s - cstart:e - cstart])
+                    pos = cend
+            smart = sha256.hexdigest()
+        else:
+            # Small file: full SHA-256 and full MD5 in the same pass.
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(1048576)
+                    if not chunk:
+                        break
+                    sha256.update(chunk)
+                    if md5:
+                        md5.update(chunk)
+            smart = sha256.hexdigest()
+        return {"smart": smart,
+                "md5": md5.hexdigest() if md5 else None,
+                "size": file_size}
+    except (OSError, PermissionError):
+        return {"smart": None, "md5": None, "size": file_size}
+
+
 def get_mime_type(file_path: str) -> Optional[str]:
     """Get MIME type of a file."""
     mime_type, _ = mimetypes.guess_type(file_path)
@@ -446,13 +527,14 @@ def clear_cache(directory: str) -> bool:
 
 
 def get_duplicates(scan_id: str) -> Optional[dict]:
-    """Get duplicate groups from a completed scan."""
+    """Get duplicate groups from a scan. Returns PARTIAL results while the scan
+    is still running (grouping is maintained live), with an 'in_progress' flag,
+    so the UI can show duplicates as they're found instead of only at the end."""
     if scan_id not in _scans:
         return None
 
     scan = _scans[scan_id]
-    if scan["status"] != "completed":
-        return None
+    in_progress = scan["status"] not in ("completed", "cancelled")
 
     groups = []
     total_wasted = 0
@@ -475,6 +557,8 @@ def get_duplicates(scan_id: str) -> Optional[dict]:
 
     return {
         "scan_id": scan_id,
+        "status": scan["status"],
+        "in_progress": in_progress,
         "total_groups": len(groups),
         "total_duplicate_files": total_dup_files,
         "total_wasted_space": total_wasted,

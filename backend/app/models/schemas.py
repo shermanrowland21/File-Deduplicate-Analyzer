@@ -52,6 +52,8 @@ class DuplicatesResponse(BaseModel):
     total_wasted_space: int
     total_wasted_space_human: str
     groups: list[DuplicateGroup]
+    status: Optional[str] = None
+    in_progress: bool = False
 
 
 class DeduplicateAction(str, Enum):

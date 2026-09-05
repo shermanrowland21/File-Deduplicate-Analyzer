@@ -1,29 +1,12 @@
-import { useState, useRef, useCallback } from 'react'
-import { api } from '../api'
-import { ScanStatus, DuplicatesResponse } from '../types'
+import { useState } from 'react'
 import { DirectoryBrowser } from './DirectoryBrowser'
+import { ScanJob } from '../useScanJob'
 
 interface ScanPanelProps {
-  onScanComplete: (status: ScanStatus, duplicates: DuplicatesResponse | null) => void
+  scan: ScanJob   // shared scan job owned by App (survives tab switches)
 }
 
-interface ScanProgress {
-  scan_id: string
-  status: string
-  total_files: number
-  discovered_files: number
-  processed_files: number
-  duplicates_found: number
-  cache_hits: number
-  directory: string
-  phase: string
-  current_file: string
-  current_dir: string
-  elapsed_seconds: number
-  error?: string
-}
-
-export function ScanPanel({ onScanComplete }: ScanPanelProps) {
+export function ScanPanel({ scan }: ScanPanelProps) {
   const [directory, setDirectory] = useState('')
   const [directories, setDirectories] = useState<string[]>([])
   const [recursive, setRecursive] = useState(true)
@@ -31,49 +14,11 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
   const [minSize, setMinSize] = useState('0')
   const [maxSize, setMaxSize] = useState('')
   const [extensions, setExtensions] = useState('')
-  const [scanning, setScanning] = useState(false)
-  const [progress, setProgress] = useState<ScanProgress | null>(null)
-  const [error, setError] = useState('')
+  const [localError, setLocalError] = useState('')
   const [showBrowser, setShowBrowser] = useState(false)
-  const pollRef = useRef<number | null>(null)
 
-  const stopPolling = useCallback(() => {
-    if (pollRef.current !== null) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-  }, [])
-
-  const pollProgress = useCallback((scanId: string) => {
-    const poll = async () => {
-      try {
-        const res = await fetch(`/api/scanner/status/${scanId}`)
-        if (!res.ok) return
-        const status: ScanProgress = await res.json()
-        setProgress(status)
-
-        if (status.status === 'completed') {
-          stopPolling()
-          setScanning(false)
-          try {
-            const dups = await api.getDuplicates(scanId)
-            onScanComplete(status as any, dups)
-          } catch {
-            onScanComplete(status as any, null)
-          }
-        } else if (status.status === 'error' || status.status === 'cancelled') {
-          stopPolling()
-          setScanning(false)
-          if (status.status === 'error') setError(status.error || 'Scan failed')
-        }
-      } catch {
-        // Keep polling
-      }
-    }
-
-    pollRef.current = window.setInterval(poll, 400)
-    poll()
-  }, [stopPolling, onScanComplete])
+  const { scanning, progress } = scan
+  const error = localError || scan.error
 
   const handleScan = async () => {
     const allDirs = [...directories]
@@ -81,66 +26,21 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
       allDirs.push(directory.trim())
     }
     if (allDirs.length === 0) {
-      setError('Please add at least one directory')
+      setLocalError('Please add at least one directory')
       return
     }
+    setLocalError('')
 
-    setError('')
-    setScanning(true)
-    setProgress(null)
-    stopPolling()
-
-    try {
-      const options: any = {
-        recursive,
-        include_hidden: includeHidden,
-        min_file_size: parseInt(minSize) || 0,
-      }
-
-      if (maxSize) {
-        options.max_file_size = parseInt(maxSize)
-      }
-
-      if (extensions.trim()) {
-        options.file_extensions = extensions.split(',').map((e: string) => e.trim())
-      }
-
-      // Send as directories array
-      const body = {
-        directories: allDirs,
-        ...options,
-      }
-
-      const response = await fetch('/api/scanner/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.detail || `HTTP ${response.status}`)
-      }
-      const status = await response.json()
-      setProgress(status)
-
-      if (status.status === 'running') {
-        pollProgress(status.scan_id)
-      } else if (status.status === 'completed') {
-        setScanning(false)
-        try {
-          const dups = await api.getDuplicates(status.scan_id)
-          onScanComplete(status, dups)
-        } catch {
-          onScanComplete(status, null)
-        }
-      } else if (status.status === 'error') {
-        setScanning(false)
-        setError(status.error || 'Scan failed')
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to start scan')
-      setScanning(false)
+    const options: any = {
+      recursive,
+      include_hidden: includeHidden,
+      min_file_size: parseInt(minSize) || 0,
     }
+    if (maxSize) options.max_file_size = parseInt(maxSize)
+    if (extensions.trim()) {
+      options.file_extensions = extensions.split(',').map((e: string) => e.trim())
+    }
+    await scan.startScan({ directories: allDirs, ...options })
   }
 
   const formatElapsed = (seconds: number): string => {
@@ -306,13 +206,7 @@ export function ScanPanel({ onScanComplete }: ScanPanelProps) {
         {scanning && progress && (
           <button
             className="btn btn-danger"
-            onClick={async () => {
-              try {
-                await fetch(`/api/scanner/stop/${progress.scan_id}`, { method: 'POST' })
-                stopPolling()
-                setScanning(false)
-              } catch {}
-            }}
+            onClick={() => scan.stopScan()}
             style={{ marginLeft: 8 }}
           >
             Stop Scan

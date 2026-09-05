@@ -40,8 +40,17 @@ export function DuplicatesPanel({ duplicates, scanId }: DuplicatesPanelProps) {
   if (!duplicates || duplicates.total_groups === 0) {
     return (
       <div className="empty-state">
-        <h3>No Duplicates Found</h3>
-        <p>Scan a directory first to find duplicate files, or the last scan found no duplicates.</p>
+        {duplicates?.in_progress ? (
+          <>
+            <h3><span className="spinner" style={{ width: 16, height: 16, marginRight: 8, verticalAlign: 'middle' }} />Scan in progress…</h3>
+            <p>Duplicates will appear here as they're found. This list updates live.</p>
+          </>
+        ) : (
+          <>
+            <h3>No Duplicates Found</h3>
+            <p>Scan a directory first to find duplicate files, or the last scan found no duplicates.</p>
+          </>
+        )}
       </div>
     )
   }

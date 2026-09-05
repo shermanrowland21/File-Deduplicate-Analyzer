@@ -25,6 +25,8 @@ export interface DuplicatesResponse {
   total_wasted_space: number;
   total_wasted_space_human: string;
   groups: DuplicateGroup[];
+  status?: string;
+  in_progress?: boolean;
 }
 
 export interface ScanStatus {

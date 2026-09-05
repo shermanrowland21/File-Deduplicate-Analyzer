@@ -6,21 +6,26 @@ import { RenamingPanel } from './components/RenamingPanel'
 import { MediaPanel } from './components/MediaPanel'
 import { VisualSearchPanel } from './components/VisualSearchPanel'
 import { ExtractPanel } from './components/ExtractPanel'
-import { DuplicatesResponse, ScanStatus } from './types'
+import { useScanJob } from './useScanJob'
 
 type View = 'scan' | 'duplicates' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming'
 
 function App() {
   const [currentView, setCurrentView] = useState<View>('scan')
-  const [scanResult, setScanResult] = useState<ScanStatus | null>(null)
-  const [duplicates, setDuplicates] = useState<DuplicatesResponse | null>(null)
+  // Scan job lives at the App level so it SURVIVES tab switches and keeps
+  // polling in the background regardless of which view is shown.
+  const scan = useScanJob()
+  const duplicates = scan.duplicates
 
   return (
     <div className="app-container">
       <header className="app-header">
         <h1>File Deduplicate Analyzer</h1>
         <span className="status">
-          {scanResult ? `Last scan: ${scanResult.directory}` : 'No scan active'}
+          {scan.progress
+            ? `${scan.scanning ? 'Scanning' : 'Last scan'}: ${scan.progress.directory}` +
+              (scan.scanning ? ` — ${scan.progress.processed_files.toLocaleString()} hashed, ${scan.progress.duplicates_found.toLocaleString()} dupes` : '')
+            : 'No scan active'}
         </span>
       </header>
 
@@ -32,6 +37,9 @@ function App() {
               onClick={() => setCurrentView('scan')}
             >
               Scan Directory
+              {scan.scanning && (
+                <span className="spinner" style={{ marginLeft: 8, width: 12, height: 12, verticalAlign: 'middle' }} title="Scan running in background" />
+              )}
             </li>
             <li
               className={currentView === 'duplicates' ? 'active' : ''}
@@ -40,7 +48,7 @@ function App() {
               Duplicates
               {duplicates && duplicates.total_groups > 0 && (
                 <span style={{ marginLeft: 8, fontSize: '0.75rem', color: 'var(--warning)' }}>
-                  ({duplicates.total_groups})
+                  ({duplicates.total_groups}{duplicates.in_progress ? '…' : ''})
                 </span>
               )}
             </li>
@@ -78,21 +86,16 @@ function App() {
         </nav>
 
         <main className="main-panel">
-          {currentView === 'scan' && (
-            <ScanPanel
-              onScanComplete={(status, dups) => {
-                setScanResult(status)
-                setDuplicates(dups)
-                if (dups && dups.total_groups > 0) {
-                  setCurrentView('duplicates')
-                }
-              }}
-            />
-          )}
+          {/* Keep ScanPanel MOUNTED across tab switches (hidden, not unmounted)
+              so its state/polling context persists. The scan job itself lives
+              in the App-level hook, but staying mounted avoids any flicker. */}
+          <div style={{ display: currentView === 'scan' ? 'block' : 'none' }}>
+            <ScanPanel scan={scan} />
+          </div>
           {currentView === 'duplicates' && (
             <DuplicatesPanel
               duplicates={duplicates}
-              scanId={scanResult?.scan_id || null}
+              scanId={scan.progress?.scan_id || null}
             />
           )}
           {currentView === 'extract' && <ExtractPanel />}

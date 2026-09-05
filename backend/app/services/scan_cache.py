@@ -74,6 +74,38 @@ def get_cached_hash(cache: dict, file_path: str, size: int, mtime: float) -> Opt
     return None
 
 
+def get_cached_entry(cache: dict, file_path: str, size: int, mtime: float) -> Optional[dict]:
+    """
+    Return the full cached entry ({hash, md5, size, mtime}) if size+mtime match,
+    else None. Backward compatible: entries created before md5 existed simply
+    have no 'md5' key.
+    """
+    normalized = file_path.replace("\\", "/")
+    entry = cache.get(normalized)
+    if entry is None:
+        return None
+    if entry.get("size") == size and entry.get("mtime") == mtime:
+        return entry
+    return None
+
+
+def put_cached_entry(cache: dict, file_path: str, size: int, mtime: float,
+                     smart_hash_val: Optional[str], md5_val: Optional[str]) -> None:
+    """
+    Store/refresh a cache entry with both the dedup smart-hash and the full MD5.
+    Mutates `cache` in place. `hash` stays the smart-hash for dedup compatibility.
+    """
+    normalized = file_path.replace("\\", "/")
+    entry = cache.get(normalized) or {}
+    entry["size"] = size
+    entry["mtime"] = mtime
+    if smart_hash_val is not None:
+        entry["hash"] = smart_hash_val
+    if md5_val is not None:
+        entry["md5"] = md5_val
+    cache[normalized] = entry
+
+
 def build_cache_entries(all_files: list) -> dict:
     """
     Build cache entries dict from a list of scanned file info dicts.
