@@ -208,14 +208,23 @@ def _load_cache(directory: str) -> dict:
 
 
 def _save_cache(directory: str, entries: dict):
-    """Save hash cache to disk."""
+    """Save hash cache to disk atomically (temp file + replace) so a crash
+    during the write can never corrupt/truncate the existing cache."""
     cache_path = _get_cache_path(directory)
     os.makedirs(CACHE_DIR, exist_ok=True)
+    tmp_path = cache_path + ".tmp"
     try:
-        with open(cache_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump({"directory": directory, "entries": entries}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, cache_path)  # atomic on Windows + POSIX
     except OSError:
-        pass
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 # --- Scanner ---
@@ -270,6 +279,15 @@ def _run_scan(
             new_caches[directory] = {}
 
         cache_hits = 0
+        since_last_flush = 0
+        FLUSH_EVERY = 500  # incrementally persist the hash cache every N files
+
+        def _flush_cache(directory):
+            """Merge new entries over the existing on-disk cache and save, so a
+            crash never discards previously computed hashes (crash-resumable)."""
+            merged = dict(caches[directory])          # previously cached hashes
+            merged.update(new_caches[directory])       # plus anything hashed this run
+            _save_cache(directory, merged)
 
         # Iterate through each source directory
         for directory in directories:
@@ -302,8 +320,8 @@ def _run_scan(
                     scan["status"] = "cancelled"
                     scan["phase"] = "cancelled"
                     scan["elapsed_seconds"] = round(time.time() - scan["started_at"], 1)
-                    # Still save cache for what we've processed
-                    _save_cache(directory, new_caches[directory])
+                    # Still save cache for what we've processed (merge, don't lose prior)
+                    _flush_cache(directory)
                     return
 
                 discovered += 1
@@ -382,6 +400,7 @@ def _run_scan(
                     processed += 1
                     scan["processed_files"] = processed
                     scan["total_files"] = processed
+                    since_last_flush += 1
 
                     if processed % 100 == 0:
                         scan["duplicates_found"] = sum(
@@ -390,8 +409,17 @@ def _run_scan(
                             if len(files) > 1
                         )
 
+                    # Incrementally persist the hash cache so a crash/kill mid-scan
+                    # doesn't throw away hashing work — next run resumes from here.
+                    if since_last_flush >= FLUSH_EVERY:
+                        _flush_cache(directory)
+                        since_last_flush = 0
+
                 except (OSError, PermissionError):
                     continue
+
+            # Flush at the end of each source directory too
+            _flush_cache(directory)
 
         # Final stats
         scan["duplicates_found"] = sum(
@@ -408,9 +436,16 @@ def _run_scan(
         scan["status"] = "completed"
         scan["elapsed_seconds"] = round(time.time() - scan["started_at"], 1)
 
-        # Save caches for each directory
+        # Save caches for each directory (merge over prior so nothing is lost)
         for directory in directories:
-            _save_cache(directory, new_caches[directory])
+            _flush_cache(directory)
+
+        # Persist the completed scan results to disk so the Duplicates page and
+        # the dedup resolver survive a backend restart (no re-scan needed).
+        try:
+            persist_scan(scan_id)
+        except Exception:
+            pass
 
     except Exception as e:
         scan["status"] = "error"
@@ -497,6 +532,17 @@ def get_scan_status(scan_id: str) -> Optional[dict]:
     }
 
 
+def get_active_scan() -> Optional[dict]:
+    """Return the status of the most recent RUNNING scan, if any. Lets the
+    frontend re-attach and resume polling after a tab switch / page reload."""
+    running = [(sid, s) for sid, s in _scans.items() if s.get("status") == "running"]
+    if not running:
+        return None
+    # most recently started
+    running.sort(key=lambda kv: kv[1].get("started_at", 0), reverse=True)
+    return get_scan_status(running[0][0])
+
+
 def get_cache_info(directory: str) -> Optional[dict]:
     """Get info about the existing cache for a directory."""
     cache_path = _get_cache_path(directory)
@@ -572,3 +618,103 @@ def get_all_files(scan_id: str) -> Optional[list]:
     if scan_id not in _scans:
         return None
     return _scans[scan_id].get("all_files", [])
+
+
+# ------------------------------------------------------------ persistence
+# Completed scans are saved to disk so the Duplicates page + dedup resolver
+# survive a backend restart without a full re-scan.
+
+_SCANS_STORE = os.path.join(os.path.expanduser("~"), ".file_dedup_analyzer", "scans")
+
+
+def persist_scan(scan_id: str) -> Optional[str]:
+    """Write a completed scan's grouped results + metadata to disk."""
+    scan = _scans.get(scan_id)
+    if not scan:
+        return None
+    os.makedirs(_SCANS_STORE, exist_ok=True)
+    payload = {
+        "scan_id": scan_id,
+        "status": scan.get("status"),
+        "directory": scan.get("directory"),
+        "directories": scan.get("directories"),
+        "started_at": scan.get("started_at"),
+        "elapsed_seconds": scan.get("elapsed_seconds"),
+        "processed_files": scan.get("processed_files"),
+        "duplicates_found": scan.get("duplicates_found"),
+        "saved_at": time.time(),
+        # only keep hash-groups that actually have duplicates (saves space)
+        "files": {h: fl for h, fl in scan.get("files", {}).items() if len(fl) > 1},
+    }
+    path = os.path.join(_SCANS_STORE, f"{scan_id}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    # update 'latest' pointer
+    with open(os.path.join(_SCANS_STORE, "latest.json"), "w", encoding="utf-8") as f:
+        json.dump({"scan_id": scan_id, "saved_at": payload["saved_at"]}, f)
+    return path
+
+
+def list_persisted_scans() -> list:
+    """List saved scans (metadata only), newest first."""
+    if not os.path.isdir(_SCANS_STORE):
+        return []
+    out = []
+    for fn in os.listdir(_SCANS_STORE):
+        if not fn.endswith(".json") or fn == "latest.json":
+            continue
+        try:
+            with open(os.path.join(_SCANS_STORE, fn), "r", encoding="utf-8") as f:
+                d = json.load(f)
+            groups = sum(1 for fl in d.get("files", {}).values() if len(fl) > 1)
+            out.append({
+                "scan_id": d.get("scan_id"),
+                "directories": d.get("directories") or d.get("directory"),
+                "saved_at": d.get("saved_at"),
+                "duplicate_groups": groups,
+                "duplicates_found": d.get("duplicates_found"),
+            })
+        except (OSError, json.JSONDecodeError):
+            continue
+    out.sort(key=lambda x: x.get("saved_at") or 0, reverse=True)
+    return out
+
+
+def load_persisted_scan(scan_id: str) -> bool:
+    """Load a persisted scan back into memory so get_duplicates works on it."""
+    if scan_id in _scans and _scans[scan_id].get("status") == "completed":
+        return True
+    path = os.path.join(_SCANS_STORE, f"{scan_id}.json")
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    _scans[scan_id] = {
+        "status": "completed",
+        "files": d.get("files", {}),
+        "all_files": [f for fl in d.get("files", {}).values() for f in fl],
+        "directory": d.get("directory"),
+        "directories": d.get("directories"),
+        "started_at": d.get("started_at", 0),
+        "elapsed_seconds": d.get("elapsed_seconds", 0),
+        "processed_files": d.get("processed_files", 0),
+        "duplicates_found": d.get("duplicates_found", 0),
+        "phase": "complete",
+    }
+    return True
+
+
+def latest_scan_id() -> Optional[str]:
+    """Return the scan_id of the most recently persisted scan, if any."""
+    p = os.path.join(_SCANS_STORE, "latest.json")
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f).get("scan_id")
+        except (OSError, json.JSONDecodeError):
+            pass
+    scans = list_persisted_scans()
+    return scans[0]["scan_id"] if scans else None

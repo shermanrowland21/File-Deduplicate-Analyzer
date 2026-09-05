@@ -87,6 +87,25 @@ export function useScanJob(): ScanJob {
     poll()
   }, [stopPolling])
 
+  // On mount: re-attach to any scan already running on the backend, so a page
+  // reload or a state reset transparently resumes progress + live duplicates.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/scanner/active')
+        if (!res.ok) return
+        const data = await res.json()
+        if (!cancelled && data && data.active && data.scan_id) {
+          setScanning(true)
+          setProgress(data)
+          pollProgress(data.scan_id)
+        }
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [pollProgress])
+
   const startScan = useCallback(async (body: any) => {
     setError('')
     setScanning(true)

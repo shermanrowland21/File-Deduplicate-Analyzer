@@ -4,9 +4,19 @@ Scan runs in background; frontend polls /status/{scan_id} for progress.
 """
 from fastapi import APIRouter, HTTPException
 from ..models.schemas import ScanRequest
-from ..services.file_scanner import scan_directory, get_scan_status, get_cache_info, clear_cache, cancel_scan
+from ..services.file_scanner import scan_directory, get_scan_status, get_cache_info, clear_cache, cancel_scan, get_active_scan
 
 router = APIRouter()
+
+
+@router.get("/active")
+async def active_scan():
+    """Return the currently running scan (if any) so the UI can re-attach after
+    a tab switch or reload. Returns {active: false} when nothing is running."""
+    status = get_active_scan()
+    if status is None:
+        return {"active": False}
+    return {"active": True, **status}
 
 
 @router.post("/scan")

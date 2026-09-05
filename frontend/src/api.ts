@@ -112,4 +112,48 @@ export const api = {
     const response = await fetch(`${API_BASE}/health`);
     return handleResponse<any>(response);
   },
+
+  // Dedup Resolver (Phase A)
+  async listScans() {
+    const response = await fetch(`${API_BASE}/resolver/scans`);
+    return handleResponse<any>(response);
+  },
+
+  async resolverAnalyze(scanId: string | null, sourceOfTruth: string[]) {
+    const response = await fetch(`${API_BASE}/resolver/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scan_id: scanId, source_of_truth: sourceOfTruth }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async resolverExecute(scanId: string | null, sourceOfTruth: string[]) {
+    const response = await fetch(`${API_BASE}/resolver/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scan_id: scanId, source_of_truth: sourceOfTruth, confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  // LLM advisor (Phase B) — reads actual file content, never guesses
+  async adviseStart(scanId: string | null, opts?: { model_id?: string; max_groups?: number; min_size?: number }) {
+    const response = await fetch(`${API_BASE}/resolver/advise`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scan_id: scanId, ...opts }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async adviseStatus(jobId: string) {
+    const response = await fetch(`${API_BASE}/resolver/advise-status/${jobId}`);
+    return handleResponse<any>(response);
+  },
+
+  async adviseStop(jobId: string) {
+    const response = await fetch(`${API_BASE}/resolver/advise-stop/${jobId}`, { method: 'POST' });
+    return handleResponse<any>(response);
+  },
 };

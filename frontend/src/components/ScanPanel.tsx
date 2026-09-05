@@ -231,6 +231,24 @@ export function ScanPanel({ scan }: ScanPanelProps) {
             </span>
           </div>
 
+          {/* Which directories this scan is actually covering (always reflects
+              the real running scan, even after a tab-switch reattach). */}
+          {progress.directory && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+              background: 'var(--bg-tertiary)', padding: '8px 12px', borderRadius: 6,
+              marginBottom: 12, fontSize: '0.8rem',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Scanning:</span>
+              {progress.directory.split(',').map((d, i) => (
+                <span key={i} style={{
+                  fontFamily: 'monospace', color: 'var(--accent)',
+                  background: 'var(--bg-primary)', padding: '2px 8px', borderRadius: 4,
+                }}>{d.trim()}</span>
+              ))}
+            </div>
+          )}
+
           {/* Progress Info */}
           <div className="scan-progress-container">
             <div className="scan-progress-header">

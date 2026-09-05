@@ -60,6 +60,7 @@ backend/verify_adds.py
 backend/verify_adds_it.py
 backend/verify_report_adds.py
 backend/verify_user_adds.py
+backend/test_cr.py
 run_extraction.ps1
 
 # Local runtime data

@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search, archives
+from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search, archives, clientlog, resolver
 
 app = FastAPI(
     title="File Deduplicate Analyzer",
@@ -35,6 +35,8 @@ app.include_router(browser.router, prefix="/api/browser", tags=["Browser"])
 app.include_router(media.router, prefix="/api/media", tags=["Media Analysis"])
 app.include_router(visual_search.router, prefix="/api/visual", tags=["Visual Search"])
 app.include_router(archives.router, prefix="/api/archives", tags=["Archives"])
+app.include_router(clientlog.router, prefix="/api/logs", tags=["Client Logs"])
+app.include_router(resolver.router, prefix="/api/resolver", tags=["Dedup Resolver"])
 
 
 @app.get("/api/health")
@@ -42,8 +44,15 @@ async def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
 
-# Serve the built React frontend
-FRONTEND_DIR = Path(r"C:\Users\sherm\Documents\GitHub\File-Deduplicate-Analyzer\frontend\dist")
+# Serve the built React frontend.
+# Resolved relative to this file (backend/app/main.py -> repo/frontend/dist)
+# so it works on any machine; override with FRONTEND_DIR env var if needed.
+FRONTEND_DIR = Path(
+    os.environ.get(
+        "FRONTEND_DIR",
+        str(Path(__file__).resolve().parents[2] / "frontend" / "dist"),
+    )
+)
 
 if FRONTEND_DIR.exists():
     # Serve static assets (JS, CSS, images)

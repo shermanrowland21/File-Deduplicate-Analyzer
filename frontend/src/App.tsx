@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { track } from './telemetry'
 import { ScanPanel } from './components/ScanPanel'
 import { DuplicatesPanel } from './components/DuplicatesPanel'
 import { AnalysisPanel } from './components/AnalysisPanel'
@@ -6,9 +7,10 @@ import { RenamingPanel } from './components/RenamingPanel'
 import { MediaPanel } from './components/MediaPanel'
 import { VisualSearchPanel } from './components/VisualSearchPanel'
 import { ExtractPanel } from './components/ExtractPanel'
+import { ResolverPanel } from './components/ResolverPanel'
 import { useScanJob } from './useScanJob'
 
-type View = 'scan' | 'duplicates' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming'
+type View = 'scan' | 'duplicates' | 'resolver' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming'
 
 function App() {
   const [currentView, setCurrentView] = useState<View>('scan')
@@ -16,6 +18,32 @@ function App() {
   // polling in the background regardless of which view is shown.
   const scan = useScanJob()
   const duplicates = scan.duplicates
+
+  // Telemetry: log every view change with a snapshot of scan state, so the
+  // server log shows exactly what the UI is doing on each tab switch.
+  useEffect(() => {
+    track('view_change', {
+      view: currentView,
+      scanning: scan.scanning,
+      scan_id: scan.progress?.scan_id ?? null,
+      processed: scan.progress?.processed_files ?? null,
+      duplicates_found: scan.progress?.duplicates_found ?? null,
+      duplicate_groups: duplicates?.total_groups ?? null,
+    })
+  }, [currentView])
+
+  // Telemetry: log scan status transitions (start/running/complete/blank).
+  useEffect(() => {
+    track('scan_state', {
+      scanning: scan.scanning,
+      status: scan.progress?.status ?? null,
+      scan_id: scan.progress?.scan_id ?? null,
+      processed: scan.progress?.processed_files ?? null,
+      duplicates_found: scan.progress?.duplicates_found ?? null,
+      dup_groups: duplicates?.total_groups ?? null,
+      error: scan.error || null,
+    })
+  }, [scan.scanning, scan.progress?.status, duplicates?.total_groups])
 
   return (
     <div className="app-container">
@@ -51,6 +79,12 @@ function App() {
                   ({duplicates.total_groups}{duplicates.in_progress ? '…' : ''})
                 </span>
               )}
+            </li>
+            <li
+              className={currentView === 'resolver' ? 'active' : ''}
+              onClick={() => setCurrentView('resolver')}
+            >
+              Resolver
             </li>
             <li
               className={currentView === 'extract' ? 'active' : ''}
@@ -98,6 +132,7 @@ function App() {
               scanId={scan.progress?.scan_id || null}
             />
           )}
+          {currentView === 'resolver' && <ResolverPanel />}
           {currentView === 'extract' && <ExtractPanel />}
           {currentView === 'media' && <MediaPanel />}
           {currentView === 'visual' && <VisualSearchPanel />}
