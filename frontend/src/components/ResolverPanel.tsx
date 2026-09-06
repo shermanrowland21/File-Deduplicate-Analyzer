@@ -4,324 +4,324 @@ import { track } from '../telemetry'
 import { DirectoryBrowser } from './DirectoryBrowser'
 
 /**
- * Directory-level dedup resolver (Phase A). Pick source-of-truth folder(s),
- * see how duplicates classify (safe cross-source vs protected structural vs
- * single-source), preview the SAFE removal plan, and execute to quarantine.
+ * Resolver — sharp, outcome-first dedup. Combines the proven patterns from
+ * dupeGuru (keeper = rule-picked, applied in bulk), Czkawka (bulk "select all
+ * except" presets + always leave one per group), and Nextcloud (preferred/keep
+ * folders). Quarantine is reversible; structural & junk handled automatically.
  */
+interface Copy {
+  path: string; size: number; size_human: string; source: string
+  modified: string; subfolder: string
+  is_keeper: boolean; removable: boolean; smart_selected: boolean; structural: boolean
+}
+interface Card {
+  hash: string; category: string; reason: string; structural: boolean
+  protected: boolean; wasted_human: string; wasted_space: number
+  keeper: string | null; copies: Copy[]
+}
+
+const TIEBREAKS = [
+  { v: 'biggest', label: 'the biggest file' },
+  { v: 'newest', label: 'the newest file' },
+  { v: 'oldest', label: 'the oldest file' },
+  { v: 'shortest_path', label: 'the shallowest path' },
+  { v: 'longest_name', label: 'the most-descriptive name' },
+  { v: 'smallest', label: 'the smallest file' },
+]
+
 export function ResolverPanel() {
   const [scans, setScans] = useState<any[]>([])
   const [scanId, setScanId] = useState<string | null>(null)
-  const [sot, setSot] = useState<string[]>([])
-  const [sotInput, setSotInput] = useState('')
-  const [analysis, setAnalysis] = useState<any>(null)
+  const [withinSource, setWithinSource] = useState(true)
+  const [preferFolder, setPreferFolder] = useState<string>('')
+  const [tiebreak, setTiebreak] = useState('biggest')
+
+  const [review, setReview] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [executing, setExecuting] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [error, setError] = useState('')
   const [showBrowser, setShowBrowser] = useState(false)
+  const [filter, setFilter] = useState('')
+  const [showProtected, setShowProtected] = useState(false)
 
-  // --- LLM advisor state ---
-  const [advJob, setAdvJob] = useState<any>(null)
-  const [advJobId, setAdvJobId] = useState<string | null>(null)
-  const [advMax, setAdvMax] = useState('100')
-  const [advMinMB, setAdvMinMB] = useState('1')
-  const advPollRef = useState<{ id: number | null }>({ id: null })[0]
-
-  const startAdvisor = async () => {
-    setError('')
-    try {
-      const r = await api.adviseStart(scanId, {
-        max_groups: parseInt(advMax) || 100,
-        min_size: (parseInt(advMinMB) || 0) * 1024 * 1024,
-      })
-      setAdvJobId(r.job_id)
-      track('advisor_start', { scan_id: scanId, job: r.job_id })
-      if (advPollRef.id) clearInterval(advPollRef.id)
-      advPollRef.id = window.setInterval(async () => {
-        try {
-          const j = await api.adviseStatus(r.job_id)
-          setAdvJob(j)
-          if (j.status === 'completed' || j.status === 'error' || j.status === 'cancelled') {
-            if (advPollRef.id) { clearInterval(advPollRef.id); advPollRef.id = null }
-          }
-        } catch {}
-      }, 1500)
-    } catch (e: any) {
-      setError(e.message || 'Advisor failed to start')
-    }
-  }
-
-  const stopAdvisor = async () => {
-    if (advJobId) { try { await api.adviseStop(advJobId) } catch {} }
-    if (advPollRef.id) { clearInterval(advPollRef.id); advPollRef.id = null }
-  }
-
-  const riskColor = (risk: string) =>
-    risk === 'low' ? 'var(--success)' : risk === 'high' ? 'var(--danger)' : 'var(--warning)'
-  const classLabel: Record<string, string> = {
-    redundant_backup: 'Redundant backup (safe)',
-    project_internal: 'Project internal (keep all)',
-    versioned_content: 'Versioned content (review)',
-    needs_human_review: 'Needs human review',
-    needs_more_content: 'Needs more content',
-  }
+  const [selected, setSelected] = useState<Record<string, boolean>>({})
+  const [keeperOverride, setKeeperOverride] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    api.listScans().then((r) => {
-      setScans(r.scans || [])
-      setScanId(r.latest || null)
-    }).catch(() => {})
+    api.listScans().then((r) => { setScans(r.scans || []); if (r.latest) setScanId(r.latest) }).catch(() => {})
   }, [])
 
-  const runAnalyze = async () => {
-    setError(''); setLoading(true); setResult(null)
+  const runReview = async () => {
+    setError(''); setResult(null); setReview(null)
+    if (!scanId) { setError('Pick a scan first'); return }
+    setLoading(true)
     try {
-      const a = await api.resolverAnalyze(scanId, sot)
-      setAnalysis(a)
-      track('resolver_analyze', { scan_id: scanId, sot, plan: a.plan_remove_count, space: a.plan_remove_space_human })
+      const r = await api.resolverReview(scanId, {
+        source_of_truth: preferFolder ? [preferFolder] : [],
+        within_source: withinSource, tiebreak,
+      })
+      setReview(r)
+      const sel: Record<string, boolean> = {}
+      for (const c of r.cards || []) for (const cp of c.copies) if (cp.smart_selected) sel[cp.path] = true
+      setSelected(sel); setKeeperOverride({})
+      track('resolver_review', { scan_id: scanId, within: withinSource, prefer: !!preferFolder, tiebreak, groups: r.summary?.total_groups })
     } catch (e: any) {
-      setError(e.message || 'Analyze failed')
-    } finally {
-      setLoading(false)
-    }
+      setError(e.message || 'Review failed')
+    } finally { setLoading(false) }
   }
 
-  const runExecute = async () => {
-    if (!sot.length) { setError('Add at least one source-of-truth folder first'); return }
-    if (!confirm(`This will move ${analysis?.plan_remove_count ?? 0} duplicate files to quarantine (reversible). Continue?`)) return
-    setError(''); setExecuting(true)
+  const cards: Card[] = review?.cards || []
+  const actionable = cards.filter((c) => !c.protected)
+  const protectedCards = cards.filter((c) => c.protected)
+  const q = filter.trim().toLowerCase()
+  const shown = q ? actionable.filter((c) => c.copies.some((cp) => cp.path.toLowerCase().includes(q))) : actionable
+
+  const keeperOf = (c: Card) => keeperOverride[c.hash] || c.keeper
+  const makeKeeper = (hash: string, path: string) => {
+    setKeeperOverride((k) => ({ ...k, [hash]: path }))
+    setSelected((s) => ({ ...s, [path]: false }))
+  }
+  const toggleCopy = (path: string) => setSelected((s) => ({ ...s, [path]: !s[path] }))
+
+  // --- bulk presets (Czkawka), always leaving the keeper (one per group) ---
+  const selectAllExceptKeeper = () => {
+    const sel: Record<string, boolean> = {}
+    for (const c of actionable) {
+      const k = keeperOf(c)
+      for (const cp of c.copies) if (cp.path !== k && !cp.structural) sel[cp.path] = true
+    }
+    setSelected(sel)
+  }
+  const clearAll = () => setSelected({})
+
+  const selectedPaths = () => {
+    const out: string[] = []
+    for (const c of actionable) {
+      const k = keeperOf(c)
+      for (const cp of c.copies) {
+        if (cp.path === k || cp.structural) continue
+        if (selected[cp.path]) out.push(cp.path)
+      }
+    }
+    return out
+  }
+  const selInfo = () => {
+    let count = 0, bytes = 0
+    for (const c of actionable) {
+      const k = keeperOf(c)
+      for (const cp of c.copies) {
+        if (cp.path === k || cp.structural) continue
+        if (selected[cp.path]) { count++; bytes += cp.size || 0 }
+      }
+    }
+    return { count, bytes }
+  }
+  const { count: selCount, bytes: selBytes } = selInfo()
+
+  const apply = async () => {
+    const paths = selectedPaths()
+    if (paths.length === 0) { setError('Nothing selected to quarantine'); return }
+    if (!window.confirm(`Quarantine ${paths.length} file(s)? Reversible — moved to a dated quarantine with a manifest, never deleted.`)) return
+    setExecuting(true); setError('')
     try {
-      const r = await api.resolverExecute(scanId, sot)
+      const r = await api.resolverExecute(scanId, {
+        source_of_truth: preferFolder ? [preferFolder] : [],
+        within_source: withinSource, tiebreak, only_paths: paths,
+      })
       setResult(r)
       track('resolver_execute', { removed: r.removed, freed: r.freed_human })
-      const a = await api.resolverAnalyze(scanId, sot)
-      setAnalysis(a)
+      await runReview()
     } catch (e: any) {
-      setError(e.message || 'Execute failed')
-    } finally {
-      setExecuting(false)
-    }
+      setError(e.message || 'Quarantine failed')
+    } finally { setExecuting(false) }
   }
 
-  const addSot = (p: string) => {
-    const v = p.trim()
-    if (v && !sot.includes(v)) setSot([...sot, v])
-    setSotInput('')
+  const undo = async () => {
+    if (!result?.manifest_path && !result?.manifest) return
+    // (undo endpoint reuse omitted for brevity; manifest is on disk)
+    setError('Undo: restore from the quarantine manifest on disk.')
   }
 
-  const cat = analysis?.by_category || {}
-  const catCard = (key: string, label: string, color: string, note: string) => {
-    const c = cat[key]
-    if (!c) return null
-    return (
-      <div className="stat-card" style={{ borderLeft: `3px solid ${color}` }}>
-        <div className="value" style={{ color, fontSize: '1.3rem' }}>{c.groups.toLocaleString()}</div>
-        <div className="label">{label}</div>
-        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4 }}>
-          {c.files.toLocaleString()} files · {c.wasted_human} · {note}
-        </div>
-      </div>
-    )
+  const s = review?.summary
+  const confColor = (structural: boolean, keeper: boolean) =>
+    keeper ? 'var(--success)' : structural ? 'var(--warning)' : 'var(--border)'
+  const human = (n: number) => {
+    if (!n) return '0 B'; const u = ['B','KB','MB','GB','TB']; let i = 0; let x = n
+    while (x >= 1024 && i < u.length - 1) { x /= 1024; i++ } return `${x.toFixed(1)} ${u[i]}`
   }
 
   return (
     <div>
-      <div className="card">
-        <div className="card-header"><h2>Duplicate Resolver</h2></div>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-          Pick your <strong>source of truth</strong> (the folder whose copies win). The resolver safely
-          marks only <strong>cross-source</strong> duplicates elsewhere for removal, and <strong>protects</strong>
-          {' '}project/website internal files (templates, node_modules, .git, etc.) from bulk deletion.
+      {/* ============ Setup ============ */}
+      <div className="card" style={{ padding: 20 }}>
+        <h2 style={{ margin: '0 0 4px' }}>Resolver</h2>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', margin: '0 0 16px' }}>
+          Keep one copy of each duplicate, quarantine the rest. Reversible. Website/framework files and
+          junk (desktop.ini etc.) are handled for you.
         </p>
 
         {error && <div className="alert alert-error">{error}</div>}
 
-        <div className="form-group">
-          <label>Scan</label>
-          <select value={scanId || ''} onChange={(e) => setScanId(e.target.value)}
-            style={{ width: '100%', padding: '8px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)' }}>
-            {scans.length === 0 && <option value="">No completed scans yet</option>}
-            {scans.map((s) => (
-              <option key={s.scan_id} value={s.scan_id}>
-                {s.duplicate_groups?.toLocaleString()} groups — {Array.isArray(s.directories) ? s.directories.join(', ') : s.directories} ({new Date((s.saved_at || 0) * 1000).toLocaleString()})
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="form-group">
-          <label>Source of Truth — folders to KEEP (winners)</label>
-          {sot.map((d, i) => (
-            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4, background: 'var(--bg-tertiary)', padding: '6px 12px', borderRadius: 6, fontFamily: 'monospace', fontSize: '0.8rem' }}>
-              <span style={{ color: 'var(--success)' }}>KEEP</span>
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{d}</span>
-              <button className="btn btn-secondary btn-sm" onClick={() => setSot(sot.filter((_, j) => j !== i))} style={{ padding: '2px 8px' }}>✕</button>
-            </div>
-          ))}
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input type="text" value={sotInput} onChange={(e) => setSotInput(e.target.value)}
-              placeholder="e.g. E:/Google Drive Files/Organized"
-              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSot(sotInput) } }}
-              style={{ flex: 1 }} />
-            <button className="btn btn-secondary" onClick={() => addSot(sotInput)} disabled={!sotInput.trim()}>Add</button>
-            <button className="btn btn-secondary" onClick={() => setShowBrowser(true)}>Browse</button>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label>Scan</label>
+            <select value={scanId || ''} onChange={(e) => { setScanId(e.target.value); setReview(null) }}>
+              <option value="">— pick a scan —</option>
+              {scans.map((sc) => (
+                <option key={sc.scan_id} value={sc.scan_id}>
+                  {(Array.isArray(sc.directories) ? sc.directories.join(' + ') : sc.directories) || sc.scan_id}
+                  {' — '}{(sc.duplicate_groups ?? 0).toLocaleString()} groups
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
 
-        <button className="btn btn-primary" onClick={runAnalyze} disabled={loading || !scanId}>
-          {loading ? <><span className="spinner" /> Analyzing...</> : 'Analyze'}
-        </button>
+          {/* Keeper rule bar — the sharp centerpiece (dupeGuru model) */}
+          <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 8 }}>Which copy do you KEEP?</div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', fontSize: '0.9rem' }}>
+              <span>Prefer files in</span>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input type="text" value={preferFolder} onChange={(e) => setPreferFolder(e.target.value)}
+                  placeholder="(any folder)" style={{ width: 320, fontFamily: 'monospace', fontSize: '0.8rem' }} />
+                <button className="btn btn-secondary btn-sm" onClick={() => setShowBrowser(true)}>Browse</button>
+                {preferFolder && <button className="btn btn-secondary btn-sm" onClick={() => setPreferFolder('')}>✕</button>}
+              </div>
+              <span>· otherwise keep</span>
+              <select value={tiebreak} onChange={(e) => setTiebreak(e.target.value)} style={{ width: 'auto' }}>
+                {TIEBREAKS.map((t) => <option key={t.v} value={t.v}>{t.label}</option>)}
+              </select>
+            </div>
+            <label className="checkbox-label" style={{ margin: '10px 0 0', fontSize: '0.82rem' }}>
+              <input type="radio" checked={withinSource} onChange={() => setWithinSource(true)} /> Clean inside one folder
+              <input type="radio" checked={!withinSource} onChange={() => setWithinSource(false)} style={{ marginLeft: 16 }} /> Compare two sources
+            </label>
+          </div>
+
+          <button className="btn btn-primary" onClick={runReview} disabled={loading || !scanId} style={{ alignSelf: 'flex-start' }}>
+            {loading ? <><span className="spinner" /> Reviewing...</> : 'Review duplicates'}
+          </button>
+        </div>
       </div>
 
-      {analysis && (
-        <>
-          <div className="card">
-            <div className="card-header"><h3>How your duplicates classify</h3></div>
-            <div className="stats-grid">
-              {catCard('cross_source_redundant', 'Cross-source (safe to dedup)', 'var(--success)', 'same file in 2+ backup locations')}
-              {catCard('structural_internal', 'Project/website internal (protected)', 'var(--warning)', 'kept — deleting could break projects')}
-              {catCard('single_source', 'Single-source (review)', 'var(--accent)', 'copies within one location')}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-header"><h3>Safe removal plan</h3></div>
-            {sot.length === 0 ? (
-              <div className="alert alert-info">Add a source-of-truth folder above and re-analyze to build a removal plan.</div>
-            ) : (
-              <>
-                <div className="stats-grid">
-                  <div className="stat-card">
-                    <div className="value" style={{ color: 'var(--danger)' }}>{analysis.plan_remove_count?.toLocaleString()}</div>
-                    <div className="label">Files to remove</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="value" style={{ color: 'var(--success)' }}>{analysis.plan_remove_space_human}</div>
-                    <div className="label">Space reclaimed</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="value" style={{ color: 'var(--warning)' }}>{analysis.protected_files?.toLocaleString()}</div>
-                    <div className="label">Protected (kept)</div>
-                  </div>
-                </div>
-
-                {analysis.removable_by_source && Object.keys(analysis.removable_by_source).length > 0 && (
-                  <div style={{ margin: '12px 0' }}>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: 6 }}>Removals by source:</div>
-                    {Object.entries<any>(analysis.removable_by_source).map(([src, v]) => (
-                      <div key={src} style={{ fontSize: '0.8rem', fontFamily: 'monospace' }}>
-                        {src}: {v.files.toLocaleString()} files · {v.space_human}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <details style={{ margin: '8px 0' }}>
-                  <summary style={{ cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                    Preview first {analysis.plan_sample?.length || 0} removals
-                  </summary>
-                  <div style={{ maxHeight: 260, overflowY: 'auto', marginTop: 8 }}>
-                    {(analysis.plan_sample || []).map((p: any, i: number) => (
-                      <div key={i} style={{ fontSize: '0.72rem', fontFamily: 'monospace', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
-                        <div style={{ color: 'var(--danger)' }}>REMOVE {p.path}</div>
-                        <div style={{ color: 'var(--success)' }}>  KEEP  {p.keep}</div>
-                      </div>
-                    ))}
-                  </div>
-                </details>
-
-                {result && (
-                  <div className="alert alert-success">
-                    Quarantined {result.removed?.toLocaleString()} files, freed {result.freed_human}.
-                    {result.error_count > 0 && ` (${result.error_count} errors)`}
-                    <div style={{ fontSize: '0.7rem', marginTop: 4 }}>Quarantine: {result.quarantine}</div>
-                  </div>
-                )}
-
-                <button className="btn btn-danger" onClick={runExecute}
-                  disabled={executing || !analysis.plan_remove_count}>
-                  {executing ? <><span className="spinner" /> Quarantining...</> : `Quarantine ${analysis.plan_remove_count?.toLocaleString()} files (reversible)`}
-                </button>
-              </>
-            )}
-          </div>
-        </>
+      {result && (
+        <div className="alert alert-success">
+          Quarantined {result.removed} file(s), freed {result.freed_human || human(result.freed || 0)}. Reversible (manifest saved).
+        </div>
       )}
 
-      {/* ---------------- AI Advisor ---------------- */}
-      <div className="card">
-        <div className="card-header"><h3>AI Advisor — reads the actual files</h3></div>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
-          For the ambiguous cases (like framework templates), the AI <strong>reads the real file
-          content</strong> (not the filename) and recommends keep/remove with cited evidence. It refuses
-          to guess — anything it can't read or judge is flagged for your review. It never deletes; you decide.
-        </p>
-        <div className="form-row">
-          <div className="form-group">
-            <label>Max groups to advise (biggest-waste first)</label>
-            <input type="number" value={advMax} onChange={(e) => setAdvMax(e.target.value)} />
+      {/* ============ Summary band ============ */}
+      {s && (
+        <div className="card" style={{ padding: 18 }}>
+          <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <Stat big value={human(selBytes)} label={`reclaimable (${selCount} selected)`} color="var(--success)" />
+            <Stat value={s.total_groups.toLocaleString()} label="duplicate groups" />
+            <Stat value={s.protected_files.toLocaleString()} label="protected / kept" color="var(--warning)" />
+            <div style={{ flex: 1 }} />
+            <button className="btn btn-primary" onClick={apply} disabled={executing || selCount === 0}>
+              {executing ? <><span className="spinner" /> Quarantining...</> : `Quarantine ${selCount} selected`}
+            </button>
           </div>
-          <div className="form-group">
-            <label>Min file size (MB)</label>
-            <input type="number" value={advMinMB} onChange={(e) => setAdvMinMB(e.target.value)} />
+          <div style={{ display: 'flex', gap: 8, marginTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Bulk:</span>
+            <button className="btn btn-secondary btn-sm" onClick={selectAllExceptKeeper}>Select all except the keeper</button>
+            <button className="btn btn-secondary btn-sm" onClick={clearAll}>Clear selection</button>
+            <span style={{ fontSize: '0.72rem', color: 'var(--success)', marginLeft: 4 }}>✓ always leaves one copy per group</span>
+            {s.capped && <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>top {cards.length} groups by size</span>}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-primary" onClick={startAdvisor}
-            disabled={!scanId || (advJob && advJob.status === 'running')}>
-            {advJob && advJob.status === 'running'
-              ? <><span className="spinner" /> Advising {advJob.done}/{advJob.total}...</>
-              : 'Get AI Advice'}
-          </button>
-          {advJob && advJob.status === 'running' && (
-            <button className="btn btn-danger" onClick={stopAdvisor}>Stop</button>
-          )}
-        </div>
+      )}
 
-        {advJob && (advJob.results || []).length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 8 }}>
-              {advJob.results.length} groups advised{advJob.status === 'running' ? ' (updating…)' : ''} — ranked by wasted space
-            </div>
-            {[...advJob.results]
-              .sort((a: any, b: any) => (b.wasted_space || 0) - (a.wasted_space || 0))
-              .map((r: any, i: number) => (
-                <div key={i} style={{
-                  border: '1px solid var(--border)', borderLeft: `4px solid ${riskColor(r.risk)}`,
-                  borderRadius: 6, padding: '10px 12px', marginBottom: 8, background: 'var(--bg-tertiary)',
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                    <span style={{ fontWeight: 600, color: riskColor(r.risk) }}>
-                      {classLabel[r.classification] || r.classification}
-                    </span>
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      {r.copies} copies · {r.wasted_human} · action: {r.recommended_action} · conf {(r.confidence ?? 0).toFixed?.(2) ?? r.confidence}
-                      {' '}· {r.content_read ? `read ${r.content_kind}` : '⚠ content not read'}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '0.8rem', marginTop: 6 }}>{r.rationale}</div>
-                  {r.evidence && (
-                    <div style={{ fontSize: '0.72rem', fontFamily: 'monospace', color: 'var(--text-secondary)', marginTop: 4, background: 'var(--bg-primary)', padding: '4px 8px', borderRadius: 4 }}>
-                      evidence: {String(r.evidence).slice(0, 240)}
+      {/* ============ Review cards ============ */}
+      {actionable.length > 0 && (
+        <div className="card" style={{ padding: 18 }}>
+          <div className="card-header" style={{ marginBottom: 12 }}>
+            <h3 style={{ margin: 0 }}>Review — {shown.length} group{shown.length === 1 ? '' : 's'}</h3>
+            <input type="text" value={filter} onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter by path…" style={{ maxWidth: 240 }} />
+          </div>
+          {shown.map((c) => {
+            const keeper = keeperOf(c)
+            return (
+              <div key={c.hash} style={{ borderRadius: 8, padding: '10px 12px', marginBottom: 10, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: 6 }}>
+                  {c.copies.length} copies · {c.wasted_human} reclaimable
+                </div>
+                {c.copies.map((cp) => {
+                  const isKeeper = cp.path === keeper
+                  const parts = cp.path.split('/')
+                  const name = parts.pop(); const dir = parts.join('/')
+                  return (
+                    <div key={cp.path} style={{
+                      display: 'flex', alignItems: 'center', gap: 10, padding: '5px 8px', borderRadius: 6,
+                      background: isKeeper ? 'rgba(46,160,67,0.08)' : 'transparent',
+                      borderLeft: `3px solid ${confColor(cp.structural, isKeeper)}`,
+                    }}>
+                      {isKeeper ? <span title="kept" style={{ color: 'var(--success)', fontWeight: 700, width: 18, textAlign: 'center' }}>★</span>
+                        : cp.structural ? <span title="protected" style={{ width: 18, textAlign: 'center' }}>🔒</span>
+                        : <input type="checkbox" checked={!!selected[cp.path]} onChange={() => toggleCopy(cp.path)} style={{ width: 18 }} />}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: '0.82rem', fontWeight: isKeeper ? 600 : 400, color: isKeeper ? 'var(--success)' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+                        <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dir}</div>
+                      </div>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                        {cp.size_human}{cp.modified ? ' · ' + cp.modified.slice(0, 10) : ''}
+                      </div>
+                      {isKeeper ? <span style={{ fontSize: '0.66rem', color: 'var(--success)', width: 84, textAlign: 'right' }}>KEEP</span>
+                        : cp.structural ? <span style={{ fontSize: '0.66rem', color: 'var(--warning)', width: 84, textAlign: 'right' }}>protected</span>
+                        : <button className="btn btn-secondary btn-sm" style={{ width: 84 }} onClick={() => makeKeeper(c.hash, cp.path)}>Keep this</button>}
                     </div>
-                  )}
-                  <details style={{ marginTop: 4 }}>
-                    <summary style={{ cursor: 'pointer', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                      {r.distinct_locations?.length || 0} locations
-                    </summary>
-                    {(r.distinct_locations || []).map((d: string, j: number) => (
-                      <div key={j} style={{ fontSize: '0.68rem', fontFamily: 'monospace', color: 'var(--text-muted)' }}>{d}</div>
-                    ))}
-                  </details>
+                  )
+                })}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ============ Protected (collapsed) ============ */}
+      {protectedCards.length > 0 && (
+        <div className="card" style={{ padding: 18 }}>
+          <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => setShowProtected(!showProtected)}>
+            <span style={{ color: 'var(--warning)' }}>🔒</span>
+            <strong style={{ fontSize: '0.9rem' }}>Protected — won't touch ({protectedCards.length} groups)</strong>
+            <span style={{ color: 'var(--text-muted)' }}>{showProtected ? '▾' : '▸'}</span>
+          </div>
+          {showProtected && (
+            <div style={{ marginTop: 10 }}>
+              <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                Framework/template/website-internal files each project legitimately needs its own copy of.
+              </p>
+              {protectedCards.slice(0, 80).map((c) => (
+                <div key={c.hash} style={{ fontSize: '0.72rem', padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
+                  <span style={{ color: 'var(--warning)' }}>{c.reason}</span>
                 </div>
               ))}
-          </div>
-        )}
-      </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {review && actionable.length === 0 && (
+        <div className="empty-state">
+          <h3>Nothing to quarantine</h3>
+          <p>No safely-removable duplicates for this rule. Try "Compare two sources", or set a preferred folder.</p>
+        </div>
+      )}
 
       {showBrowser && (
-        <DirectoryBrowser onSelect={(p) => { addSot(p); setShowBrowser(false) }} onClose={() => setShowBrowser(false)} />
+        <DirectoryBrowser onSelect={(p) => { setPreferFolder(p); setShowBrowser(false) }} onClose={() => setShowBrowser(false)} />
       )}
+    </div>
+  )
+}
+
+function Stat({ value, label, color, big }: { value: string; label: string; color?: string; big?: boolean }) {
+  return (
+    <div>
+      <div style={{ fontSize: big ? '2rem' : '1.3rem', fontWeight: 700, lineHeight: 1, color: color || 'var(--text-primary)' }}>{value}</div>
+      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>{label}</div>
     </div>
   )
 }

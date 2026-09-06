@@ -58,14 +58,11 @@ export function useScanJob(): ScanJob {
         const status: ScanProgress = await res.json()
         setProgress(status)
 
-        // Fetch duplicates LIVE every ~5 ticks (partial results now supported).
-        dupTickRef.current += 1
-        if (status.duplicates_found > 0 && dupTickRef.current % 5 === 0) {
-          try {
-            const dups = await api.getDuplicates(scanId)
-            if (dups) setDuplicates(dups)
-          } catch { /* ignore mid-scan */ }
-        }
+        // NOTE: we intentionally do NOT fetch the full duplicates payload during
+        // the scan. On large datasets that response is hundreds of MB / hundreds
+        // of thousands of rows and freezes the browser. The lightweight /status
+        // poll already provides live counts for the progress UI. Full duplicates
+        // are fetched once, on completion, below.
 
         if (status.status === 'completed') {
           stopPolling()

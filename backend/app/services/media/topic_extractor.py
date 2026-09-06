@@ -16,8 +16,13 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-# Use Haiku for speed on bulk topic extraction
-DEFAULT_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
+# Model resolved from the central Settings store (UI-settable) at call time.
+def _default_model() -> str:
+    from .. import settings_store
+    return settings_store.get_model("media_topics")
+
+# kept as a module constant for any legacy references (evaluated once)
+DEFAULT_MODEL = _default_model()
 CHUNK_SIZE_SECONDS = 60  # Process transcript in 60-second chunks
 
 
@@ -205,11 +210,13 @@ def extract_topics_from_transcript(
 def generate_file_summary(
     transcript_text: str,
     visual_descriptions: list[str] = None,
-    model_id: str = "anthropic.claude-3-5-haiku-20241022-v1:0",
+    model_id: Optional[str] = None,
 ) -> dict:
     """
     Generate an overall summary of a media file from its transcript and visual analysis.
     """
+    if model_id is None:
+        model_id = _default_model()
     client = get_bedrock_client()
 
     visual_context = ""

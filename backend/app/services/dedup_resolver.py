@@ -136,7 +136,101 @@ def _under_any(path: str, roots: list[str]) -> bool:
     return False
 
 
-def analyze(scan_id: str, source_of_truth: Optional[list[str]] = None) -> Optional[dict]:
+# Junk files that inflate duplicate counts but aren't real data — excluded from
+# review + removal planning entirely (filtered before grouping is presented).
+_JUNK_NAMES = {"desktop.ini", "thumbs.db", ".ds_store", "icon\r", ".picasa.ini"}
+
+
+def is_junk(path: str) -> bool:
+    name = os.path.basename(_norm(path)).lower()
+    return name in _JUNK_NAMES
+
+
+def _tiebreak_key(f: dict, tiebreak: str):
+    """Sort key so the KEEPER (best copy) sorts FIRST (smallest key). Mirrors
+    dupeGuru/Czkawka criteria."""
+    path = f.get("path", "")
+    if tiebreak == "newest":
+        return -(f.get("mtime") or _mtime_of(f))
+    if tiebreak == "oldest":
+        return (f.get("mtime") or _mtime_of(f))
+    if tiebreak == "longest_name":
+        return -len(os.path.basename(path))
+    if tiebreak == "shortest_path":
+        return len(path)
+    if tiebreak == "smallest":
+        return f.get("size", 0)
+    # default: biggest
+    return -f.get("size", 0)
+
+
+def _mtime_of(f: dict) -> float:
+    # modified_time is an ISO string in enriched records; fall back to 0
+    mt = f.get("modified_time") or ""
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(mt).timestamp() if mt else 0.0
+    except Exception:
+        return 0.0
+
+
+def _pick_keeper(files: list[dict], prefer_folders: list[str], tiebreak: str) -> dict:
+    """Choose the keeper for a group by a RULE STACK (dupeGuru model):
+    1) prefer any copy under a preferred/keep folder, then
+    2) the tiebreaker (biggest by default). Applied consistently in bulk."""
+    def key(f):
+        under_pref = 0 if (prefer_folders and _under_any(f["path"], prefer_folders)) else 1
+        return (under_pref, _tiebreak_key(f, tiebreak))
+    return min(files, key=key)
+
+
+def _plan_removals_for_group(g: dict, source_of_truth: list[str],
+                             within_source: bool, tiebreak: str = "biggest"
+                             ) -> tuple[Optional[dict], list[dict]]:
+    """Given a classified group, return (keeper, [removals]) applying safety rules.
+    - structural_internal: never removed (protected).
+    - junk files (desktop.ini/.DS_Store/Thumbs.db): dropped entirely.
+    - keeper chosen by rule stack: prefer source_of_truth folder, then tiebreak.
+    - leave-one-per-group invariant: the keeper is NEVER a removal (a survivor
+      always remains).
+    - cross_source_redundant: remove OTHER-source copies.
+    - single_source: removable only when within_source=True.
+    """
+    cat = g["category"]
+    if cat == "structural_internal":
+        return None, []
+    if cat == "single_source" and not within_source:
+        return None, []
+
+    # drop junk from consideration
+    files = [f for f in g["files"] if not is_junk(f["path"])]
+    if len(files) < 2:
+        return None, []   # nothing to dedupe once junk is removed
+
+    keeper = _pick_keeper(files, source_of_truth, tiebreak)
+
+    removals = []
+    for f in files:
+        if f["path"] == keeper["path"]:
+            continue
+        # Never remove a structural/framework file, even within one source.
+        if _is_structural_path(f["path"]):
+            continue
+        # For CROSS-source, never remove a copy that IS under the source of truth.
+        # For WITHIN-source, we DO remove other in-source copies (that's the point),
+        # but still never the keeper (handled above).
+        if cat == "cross_source_redundant" and source_of_truth and _under_any(f["path"], source_of_truth):
+            continue
+        removals.append({
+            "path": f["path"], "size": f["size"], "source": _top_source(f),
+            "keep": keeper["path"], "keep_source": _top_source(keeper),
+            "hash": g.get("hash"), "category": cat,
+        })
+    return keeper, removals
+
+
+def analyze(scan_id: str, source_of_truth: Optional[list[str]] = None,
+            within_source: bool = False, tiebreak: str = "biggest") -> Optional[dict]:
     """
     Produce a resolver analysis for a scan:
       - classify every duplicate group
@@ -167,45 +261,23 @@ def analyze(scan_id: str, source_of_truth: Optional[list[str]] = None) -> Option
         c["files"] += len(g["files"])
         c["wasted"] += g.get("total_wasted_space", 0)
 
-        if cat in ("structural_internal", "single_source"):
-            protected_count += len(g["files"])
+        keeper, removals = _plan_removals_for_group(g, source_of_truth, within_source, tiebreak)
+        if not removals:
+            # nothing removable in this group → its extra copies are protected/kept
+            protected_count += max(0, len(g["files"]) - 1)
             protected_space += g.get("total_wasted_space", 0)
             continue
-
-        # cross_source_redundant — build safe removal plan
-        files = g["files"]
-        # choose the KEEPER
-        keeper = None
-        if source_of_truth:
-            in_sot = [f for f in files if _under_any(f["path"], source_of_truth)]
-            if in_sot:
-                keeper = max(in_sot, key=lambda f: f["size"])
-        if keeper is None:
-            keeper = max(files, key=lambda f: f["size"])  # default: biggest
-
-        for f in files:
-            if f["path"] == keeper["path"]:
-                continue
-            # SAFETY: only remove a copy that is NOT under the source of truth,
-            # and never a structural path.
-            if source_of_truth and _under_any(f["path"], source_of_truth):
-                continue
-            if _is_structural_path(f["path"]):
-                continue
-            plan_remove.append({
-                "path": f["path"], "size": f["size"], "source": _top_source(f),
-                "keep": keeper["path"], "keep_source": _top_source(keeper),
-                "hash": g.get("hash"),
-            })
-            src = _top_source(f)
-            s = by_source_removable.setdefault(src, {"files": 0, "space": 0})
+        for r in removals:
+            plan_remove.append(r)
+            s = by_source_removable.setdefault(r["source"], {"files": 0, "space": 0})
             s["files"] += 1
-            s["space"] += f["size"]
+            s["space"] += r["size"]
 
     remove_space = sum(x["size"] for x in plan_remove)
     return {
         "scan_id": scan_id,
         "source_of_truth": source_of_truth,
+        "within_source": within_source,
         "total_groups": len(classified),
         "by_category": {
             k: {**v, "wasted_human": human_readable_size(v["wasted"])}
@@ -225,38 +297,132 @@ def analyze(scan_id: str, source_of_truth: Optional[list[str]] = None) -> Option
     }
 
 
+def build_review(scan_id: str, source_of_truth: Optional[list[str]] = None,
+                 within_source: bool = False, limit: int = 300,
+                 tiebreak: str = "biggest") -> Optional[dict]:
+    """Build the card-based review payload for the redesigned Resolver UI.
+
+    Returns a summary + per-group cards (biggest-waste first, capped) where each
+    card has a KEEPER and copy rows flagged removable / smart_selected / structural,
+    plus a separate count of PROTECTED groups (structural or nothing-removable).
+    This is what the outcome-first UI renders.
+    """
+    dup = get_duplicates(scan_id, limit=limit)
+    if dup is None:
+        return None
+    source_of_truth = source_of_truth or []
+
+    cards = []
+    protected_groups = 0
+    protected_files = 0
+    auto_selected = 0
+    reclaimable = 0
+    total_groups = 0
+
+    for g in dup.get("groups", []):
+        cg = classify_group(g)
+        keeper, removals = _plan_removals_for_group(cg, source_of_truth, within_source, tiebreak)
+        removable_paths = {r["path"] for r in removals}
+        # non-junk copies only (junk excluded entirely from the review)
+        copies = [f for f in cg["files"] if not is_junk(f["path"])]
+        if len(copies) < 2:
+            continue   # was only junk / single real file
+        total_groups += 1
+
+        if not removals:
+            protected_groups += 1
+            protected_files += max(0, len(cg["files"]) - 1)
+            # still emit a card so the UI can show it in the protected section
+            cards.append({
+                "hash": cg.get("hash"),
+                "category": cg["category"],
+                "reason": cg.get("reason", ""),
+                "structural": cg.get("structural", False),
+                "protected": True,
+                "wasted_space": cg.get("total_wasted_space", 0),
+                "wasted_human": human_readable_size(cg.get("total_wasted_space", 0)),
+                "keeper": (keeper or copies[0])["path"] if copies else None,
+                "copies": [_review_copy(f, keeper, removable_paths, cg) for f in copies],
+            })
+            continue
+
+        # smart-select: every removable copy is a safe pick by default
+        auto_selected += len(removals)
+        reclaimable += sum(r["size"] for r in removals)
+        cards.append({
+            "hash": cg.get("hash"),
+            "category": cg["category"],
+            "reason": cg.get("reason", ""),
+            "structural": cg.get("structural", False),
+            "protected": False,
+            "wasted_space": cg.get("total_wasted_space", 0),
+            "wasted_human": human_readable_size(cg.get("total_wasted_space", 0)),
+            "keeper": keeper["path"] if keeper else None,
+            "copies": [_review_copy(f, keeper, removable_paths, cg) for f in copies],
+        })
+
+    # actionable cards first (biggest reclaimable), protected last
+    cards.sort(key=lambda c: (c["protected"], -c["wasted_space"]))
+    return {
+        "scan_id": scan_id,
+        "within_source": within_source,
+        "source_of_truth": source_of_truth,
+        "summary": {
+            "total_groups": total_groups,
+            "auto_selected": auto_selected,
+            "reclaimable_space": reclaimable,
+            "reclaimable_human": human_readable_size(reclaimable),
+            "protected_groups": protected_groups,
+            "protected_files": protected_files,
+            "capped": total_groups >= limit,
+        },
+        "cards": cards,
+    }
+
+
+def _review_copy(f: dict, keeper: Optional[dict], removable_paths: set, cg: dict) -> dict:
+    """Shape one copy row for a review card."""
+    is_keeper = bool(keeper) and f["path"] == keeper["path"]
+    removable = f["path"] in removable_paths
+    return {
+        "path": f["path"],
+        "size": f["size"],
+        "size_human": human_readable_size(f["size"]),
+        "source": _top_source(f),
+        "modified": f.get("modified_time", ""),
+        "subfolder": f.get("subfolder", ""),
+        "is_keeper": is_keeper,
+        "removable": removable,
+        "smart_selected": removable,          # safe picks pre-checked
+        "structural": _is_structural_path(f["path"]),
+    }
+
+
 def execute(scan_id: str, source_of_truth: list[str],
-            action: str = "quarantine") -> dict:
+            action: str = "quarantine", within_source: bool = False,
+            only_paths: Optional[list[str]] = None, tiebreak: str = "biggest") -> dict:
     """
     Execute the safe removal plan. Moves each planned file to a dated quarantine
     (reversible). Writes a manifest. Never hard-deletes here.
+
+    If `only_paths` is given, execute ONLY those paths that are also in the safe
+    plan (lets the UI apply a user-reviewed subset). Otherwise the whole plan runs.
     """
-    analysis = analyze(scan_id, source_of_truth)
-    if analysis is None:
+    dup = get_duplicates(scan_id)
+    if dup is None:
         return {"error": "scan not found"}
 
-    # Rebuild the full plan (analysis only returns a sample)
-    dup = get_duplicates(scan_id)
+    # Rebuild the full safe plan via the shared, safety-checked planner.
     plan = []
     for g in dup.get("groups", []):
         cg = classify_group(g)
-        if cg["category"] != "cross_source_redundant":
-            continue
-        files = cg["files"]
-        keeper = None
-        in_sot = [f for f in files if _under_any(f["path"], source_of_truth)]
-        if in_sot:
-            keeper = max(in_sot, key=lambda f: f["size"])
-        else:
-            keeper = max(files, key=lambda f: f["size"])
-        for f in files:
-            if f["path"] == keeper["path"]:
-                continue
-            if source_of_truth and _under_any(f["path"], source_of_truth):
-                continue
-            if _is_structural_path(f["path"]):
-                continue
-            plan.append({"path": f["path"], "size": f["size"], "keep": keeper["path"]})
+        _keeper, removals = _plan_removals_for_group(cg, source_of_truth, within_source, tiebreak)
+        for r in removals:
+            plan.append({"path": r["path"], "size": r["size"], "keep": r["keep"]})
+
+    if only_paths is not None:
+        allow = set(only_paths)
+        plan = [p for p in plan if p["path"] in allow]
 
     qroot = os.path.join(STORE_DIR, f"_DedupQuarantine_{time.strftime('%Y%m%d_%H%M%S')}")
     os.makedirs(qroot, exist_ok=True)

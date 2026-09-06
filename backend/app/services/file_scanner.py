@@ -15,11 +15,17 @@ from datetime import datetime
 from typing import Optional
 import mimetypes
 
+from . import scan_store
+
 # In-memory store for scan results
 _scans: dict = {}
 
 # Persistent cache directory
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".file_dedup_cache")
+
+# Diagnostic: records the outcome of the last cache load per directory so we can
+# see (via scan status) whether the on-disk hash cache was actually loaded.
+_cache_load_diag: dict = {}
 
 
 def human_readable_size(size_bytes: int) -> str:
@@ -198,12 +204,16 @@ def _load_cache(directory: str) -> dict:
     """Load cached hashes. Returns dict of filepath -> {hash, size, mtime}."""
     cache_path = _get_cache_path(directory)
     if not os.path.exists(cache_path):
+        _cache_load_diag[directory] = "no cache file"
         return {}
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data.get("entries", {})
-    except (json.JSONDecodeError, OSError):
+        entries = data.get("entries", {})
+        _cache_load_diag[directory] = f"loaded {len(entries)} entries"
+        return entries
+    except Exception as e:   # widen: MemoryError, JSONDecodeError, OSError, etc.
+        _cache_load_diag[directory] = f"LOAD FAILED: {type(e).__name__}: {e}"
         return {}
 
 
@@ -281,6 +291,14 @@ def _run_scan(
         cache_hits = 0
         since_last_flush = 0
         FLUSH_EVERY = 500  # incrementally persist the hash cache every N files
+        DUPCOUNT_EVERY = 5000  # recompute the dup count via cheap SQL periodically
+
+        # SQLite-backed store: file records stream to disk so RAM stays flat
+        # regardless of file count. The .db file is itself the crash-durable
+        # checkpoint (WAL + batched commits), so no separate JSON checkpoint is
+        # needed during the scan.
+        store = scan_store.open_store(scan_id)
+        scan["store"] = store
 
         def _flush_cache(directory):
             """Merge new entries over the existing on-disk cache and save, so a
@@ -320,8 +338,10 @@ def _run_scan(
                     scan["status"] = "cancelled"
                     scan["phase"] = "cancelled"
                     scan["elapsed_seconds"] = round(time.time() - scan["started_at"], 1)
-                    # Still save cache for what we've processed (merge, don't lose prior)
+                    # Still save cache + flush store for what we've processed
                     _flush_cache(directory)
+                    store.flush()
+                    scan["duplicates_found"] = store.count_duplicate_files()
                     return
 
                 discovered += 1
@@ -370,63 +390,46 @@ def _run_scan(
                         "mtime": mtime,
                     }
 
-                    # Compute relative path within the source directory
-                    relative_path = os.path.relpath(fp, directory).replace("\\", "/")
-                    subfolder = os.path.dirname(relative_path).replace("\\", "/")
-
                     scan["current_file"] = os.path.basename(fp)
 
-                    file_info = {
-                        "path": normalized_path,
-                        "filename": os.path.basename(fp),
-                        "extension": Path(fp).suffix.lower(),
-                        "size": size,
-                        "size_human": human_readable_size(size),
-                        "mime_type": get_mime_type(fp),
-                        "hash": file_hash,
-                        "modified_time": datetime.fromtimestamp(mtime).isoformat(),
-                        "created_time": datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                        "source": source_label,
-                        "source_path": dir_normalized,
-                        "subfolder": subfolder,
-                    }
-
-                    # Group by hash
-                    if file_hash not in scan["files"]:
-                        scan["files"][file_hash] = []
-                    scan["files"][file_hash].append(file_info)
-                    scan["all_files"].append(file_info)
+                    # Stream the record to the SQLite store (flat memory). Only
+                    # raw fields are stored; display fields are computed lazily on
+                    # read for the duplicates the user actually sees.
+                    store.add_file(
+                        normalized_path, file_hash, size,
+                        mtime, stat.st_ctime, source_label, dir_normalized)
 
                     processed += 1
                     scan["processed_files"] = processed
                     scan["total_files"] = processed
                     since_last_flush += 1
 
+                    # Publish live progress. The dup count is a cheap indexed SQL
+                    # query, run periodically (not every file).
+                    if processed % DUPCOUNT_EVERY == 0:
+                        scan["duplicates_found"] = store.count_duplicate_files()
                     if processed % 100 == 0:
-                        scan["duplicates_found"] = sum(
-                            len(files) - 1
-                            for files in scan["files"].values()
-                            if len(files) > 1
-                        )
+                        scan["cache_hits"] = cache_hits
 
                     # Incrementally persist the hash cache so a crash/kill mid-scan
                     # doesn't throw away hashing work — next run resumes from here.
                     if since_last_flush >= FLUSH_EVERY:
                         _flush_cache(directory)
                         since_last_flush = 0
+                    # (No separate results checkpoint needed: the SQLite store is
+                    # committed in batches and is itself the durable checkpoint.)
 
                 except (OSError, PermissionError):
                     continue
 
-            # Flush at the end of each source directory too
+            # Flush the hash cache at the end of each source directory too.
             _flush_cache(directory)
+            store.flush()
+            scan["duplicates_found"] = store.count_duplicate_files()
 
-        # Final stats
-        scan["duplicates_found"] = sum(
-            len(files) - 1
-            for files in scan["files"].values()
-            if len(files) > 1
-        )
+        # Final stats (from the store)
+        store.flush()
+        scan["duplicates_found"] = store.count_duplicate_files()
         scan["total_files"] = processed
         scan["phase"] = "complete"
         scan["current_file"] = ""
@@ -440,8 +443,8 @@ def _run_scan(
         for directory in directories:
             _flush_cache(directory)
 
-        # Persist the completed scan results to disk so the Duplicates page and
-        # the dedup resolver survive a backend restart (no re-scan needed).
+        # Write a small metadata record so the scan is listable/resumable after a
+        # restart. The bulk results live in the SQLite store (.db), not here.
         try:
             persist_scan(scan_id)
         except Exception:
@@ -450,6 +453,11 @@ def _run_scan(
     except Exception as e:
         scan["status"] = "error"
         scan["error"] = str(e)
+        try:
+            if scan.get("store"):
+                scan["store"].flush()
+        except Exception:
+            pass
 
 
 def scan_directory(
@@ -481,7 +489,7 @@ def scan_directory(
         "hashing_size": 0,
         "elapsed_seconds": 0,
         "files": {},
-        "all_files": [],
+        "store": None,
         "started_at": time.time(),
     }
 
@@ -529,6 +537,115 @@ def get_scan_status(scan_id: str) -> Optional[dict]:
         "hashing_size": scan.get("hashing_size", 0),
         "elapsed_seconds": elapsed,
         "error": scan.get("error", None),
+        "cache_load_diag": dict(_cache_load_diag),
+    }
+
+
+def build_store_from_cache(directories: list[str]) -> Optional[str]:
+    """Create a dedup-ready SQLite scan store DIRECTLY from the existing hash
+    caches for the given directories — NO filesystem walk, NO re-hashing. This
+    makes already-hashed trees (e.g. Dropbox) immediately available for
+    deduplication while a live scan of other directories is still running.
+
+    Returns a new scan_id whose store is populated + persisted, or None if no
+    cache exists for any of the directories.
+    """
+    scan_id = str(uuid.uuid4())
+    store = scan_store.open_store(scan_id)
+    total = 0
+    covered = []
+    for directory in directories:
+        entries = _load_cache(directory)
+        if not entries:
+            continue
+        dir_normalized = directory.replace("\\", "/").rstrip("/")
+        source_label = os.path.basename(dir_normalized)
+        total += scan_store.import_hash_cache(store, entries, source_label, dir_normalized)
+        covered.append(dir_normalized)
+    store.flush()
+    if total == 0:
+        store.close()
+        return None
+    # Register in memory + persist metadata so it's listable/resumable.
+    _scans[scan_id] = {
+        "status": "completed",
+        "files": {},
+        "store": store,
+        "directory": ", ".join(os.path.basename(d) for d in covered),
+        "directories": directories,
+        "started_at": time.time(),
+        "elapsed_seconds": 0,
+        "processed_files": total,
+        "total_files": total,
+        "discovered_files": total,
+        "duplicates_found": store.count_duplicate_files(),
+        "cache_hits": total,
+        "phase": "complete",
+        "current_file": "", "current_dir": "", "current_source": "",
+        "hashing_size": 0,
+    }
+    try:
+        persist_scan(scan_id)
+    except Exception:
+        pass
+    return scan_id
+
+
+def merge_scans(source_scan_ids: list[str]) -> Optional[dict]:
+    """Merge several finished scans into one unified scan for CROSS-SOURCE dedup
+    (e.g. combine the Dropbox scan + the Google Drive scan to find files that
+    live in both). No re-scan / re-hash. Returns the new merged scan summary, or
+    None if none of the sources had a store."""
+    if not source_scan_ids:
+        return None
+    # ensure each source store exists (load persisted if needed)
+    valid = [sid for sid in source_scan_ids if scan_store.store_exists(sid)]
+    if not valid:
+        return None
+    new_scan_id = str(uuid.uuid4())
+    res = scan_store.merge_stores(valid, new_scan_id)
+    store = res["store"]
+    # gather directory labels from the source persisted metadata
+    dirs = []
+    for sid in valid:
+        try:
+            p = os.path.join(_SCANS_STORE, f"{sid}.json")
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    md = json.load(f)
+                for d in (md.get("directories") or []):
+                    if d not in dirs:
+                        dirs.append(d)
+        except (OSError, json.JSONDecodeError):
+            pass
+    _scans[new_scan_id] = {
+        "status": "completed",
+        "files": {},
+        "store": store,
+        "directory": ", ".join(os.path.basename(d.rstrip("/\\")) for d in dirs) or "merged",
+        "directories": dirs,
+        "started_at": time.time(),
+        "elapsed_seconds": 0,
+        "processed_files": res["total_files"],
+        "total_files": res["total_files"],
+        "discovered_files": res["total_files"],
+        "duplicates_found": store.count_duplicate_files(),
+        "cache_hits": 0,
+        "phase": "complete",
+        "current_file": "", "current_dir": "", "current_source": "",
+        "hashing_size": 0,
+        "merged_from": valid,
+    }
+    try:
+        persist_scan(new_scan_id)
+    except Exception:
+        pass
+    return {
+        "scan_id": new_scan_id,
+        "sources": valid,
+        "total_files": res["total_files"],
+        "duplicate_groups": res["duplicate_groups"],
+        "directories": dirs,
     }
 
 
@@ -572,21 +689,60 @@ def clear_cache(directory: str) -> bool:
     return False
 
 
-def get_duplicates(scan_id: str) -> Optional[dict]:
+def _enrich_file(f: dict) -> dict:
+    """Expand a memory-lean file record into the full display shape the UI/
+    resolver expect. Derived fields are computed on demand here (only for
+    duplicates), not stored per-file during the scan. Backward-compatible with
+    older persisted scans that already have the full fields."""
+    if "filename" in f and "size_human" in f:
+        return f  # already a full record (old persisted scan)
+    path = f.get("path", "")
+    src_path = f.get("source_path", "")
+    # subfolder relative to the source root, best-effort
+    subfolder = ""
+    if src_path and path.startswith(src_path):
+        rel = path[len(src_path):].lstrip("/")
+        subfolder = os.path.dirname(rel)
+    mtime = f.get("mtime")
+    ctime = f.get("ctime")
+    return {
+        **f,
+        "filename": os.path.basename(path),
+        "extension": os.path.splitext(path)[1].lower(),
+        "size_human": human_readable_size(f.get("size", 0)),
+        "mime_type": get_mime_type(path),
+        "modified_time": datetime.fromtimestamp(mtime).isoformat() if mtime else "",
+        "created_time": datetime.fromtimestamp(ctime).isoformat() if ctime else "",
+        "subfolder": subfolder,
+    }
+
+
+def get_duplicates(scan_id: str, limit: Optional[int] = None) -> Optional[dict]:
     """Get duplicate groups from a scan. Returns PARTIAL results while the scan
     is still running (grouping is maintained live), with an 'in_progress' flag,
-    so the UI can show duplicates as they're found instead of only at the end."""
-    if scan_id not in _scans:
+    so the UI can show duplicates as they're found instead of only at the end.
+    `limit` caps the number of groups (biggest-waste first) for responsiveness."""
+    scan = _scans.get(scan_id)
+    in_progress = bool(scan) and scan["status"] not in ("completed", "cancelled")
+    status = scan["status"] if scan else "completed"
+
+    # Prefer the SQLite store (current scans). Duplicate detection + grouping is
+    # done by indexed SQL, so this is memory-light even for millions of files.
+    store = None
+    if scan and scan.get("store") is not None:
+        store = scan["store"]
+    elif scan_store.store_exists(scan_id):
+        store = scan_store.open_store(scan_id)
+    if store is not None:
+        return store.duplicates_payload(status, in_progress, limit=limit)
+
+    # Legacy fallback: an in-memory dict from an older persisted JSON scan.
+    if scan is None:
         return None
-
-    scan = _scans[scan_id]
-    in_progress = scan["status"] not in ("completed", "cancelled")
-
     groups = []
     total_wasted = 0
     total_dup_files = 0
-
-    for file_hash, files in scan["files"].items():
+    for file_hash, files in scan.get("files", {}).items():
         if len(files) > 1:
             wasted = (len(files) - 1) * files[0]["size"]
             total_wasted += wasted
@@ -596,14 +752,14 @@ def get_duplicates(scan_id: str) -> Optional[dict]:
                 "file_count": len(files),
                 "total_wasted_space": wasted,
                 "total_wasted_space_human": human_readable_size(wasted),
-                "files": files,
+                "files": [_enrich_file(f) for f in files],
             })
-
     groups.sort(key=lambda g: g["total_wasted_space"], reverse=True)
-
+    if limit:
+        groups = groups[:limit]
     return {
         "scan_id": scan_id,
-        "status": scan["status"],
+        "status": status,
         "in_progress": in_progress,
         "total_groups": len(groups),
         "total_duplicate_files": total_dup_files,
@@ -614,10 +770,11 @@ def get_duplicates(scan_id: str) -> Optional[dict]:
 
 
 def get_all_files(scan_id: str) -> Optional[list]:
-    """Get all files from a completed scan."""
+    """Get all files from a scan (reconstructed from the hash-grouped dict; the
+    redundant all_files list was removed to cut memory)."""
     if scan_id not in _scans:
         return None
-    return _scans[scan_id].get("all_files", [])
+    return [f for fl in _scans[scan_id].get("files", {}).values() for f in fl]
 
 
 # ------------------------------------------------------------ persistence
@@ -627,15 +784,22 @@ def get_all_files(scan_id: str) -> Optional[list]:
 _SCANS_STORE = os.path.join(os.path.expanduser("~"), ".file_dedup_analyzer", "scans")
 
 
-def persist_scan(scan_id: str) -> Optional[str]:
-    """Write a completed scan's grouped results + metadata to disk."""
+def persist_scan(scan_id: str, status_override: Optional[str] = None) -> Optional[str]:
+    """Write a scan's grouped results + metadata to disk, atomically.
+
+    Used both for the FINAL save on completion AND for periodic CHECKPOINTS
+    during a long scan (crash durability). `status_override` lets a checkpoint
+    record the true in-progress state while still being loadable by the resolver.
+    Writing is atomic (temp file + os.replace) so a crash mid-write can never
+    corrupt an existing good checkpoint.
+    """
     scan = _scans.get(scan_id)
     if not scan:
         return None
     os.makedirs(_SCANS_STORE, exist_ok=True)
     payload = {
         "scan_id": scan_id,
-        "status": scan.get("status"),
+        "status": status_override or scan.get("status"),
         "directory": scan.get("directory"),
         "directories": scan.get("directories"),
         "started_at": scan.get("started_at"),
@@ -643,15 +807,38 @@ def persist_scan(scan_id: str) -> Optional[str]:
         "processed_files": scan.get("processed_files"),
         "duplicates_found": scan.get("duplicates_found"),
         "saved_at": time.time(),
-        # only keep hash-groups that actually have duplicates (saves space)
-        "files": {h: fl for h, fl in scan.get("files", {}).items() if len(fl) > 1},
+        # Store-backed scans keep bulk results in the SQLite .db (not here); we
+        # only record a flag + group count. Legacy scans still embed dup groups.
+        "has_store": scan_store.store_exists(scan_id),
+        "duplicate_groups": (scan["store"].count_groups()
+                             if scan.get("store") is not None else None),
+        "files": {} if scan_store.store_exists(scan_id)
+                  else {h: fl for h, fl in scan.get("files", {}).items() if len(fl) > 1},
     }
     path = os.path.join(_SCANS_STORE, f"{scan_id}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
-    # update 'latest' pointer
-    with open(os.path.join(_SCANS_STORE, "latest.json"), "w", encoding="utf-8") as f:
-        json.dump({"scan_id": scan_id, "saved_at": payload["saved_at"]}, f)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return None
+    # update 'latest' pointer (best-effort, also atomic)
+    try:
+        lp = os.path.join(_SCANS_STORE, "latest.json")
+        ltmp = lp + ".tmp"
+        with open(ltmp, "w", encoding="utf-8") as f:
+            json.dump({"scan_id": scan_id, "saved_at": payload["saved_at"]}, f)
+        os.replace(ltmp, lp)
+    except OSError:
+        pass
     return path
 
 
@@ -666,13 +853,19 @@ def list_persisted_scans() -> list:
         try:
             with open(os.path.join(_SCANS_STORE, fn), "r", encoding="utf-8") as f:
                 d = json.load(f)
-            groups = sum(1 for fl in d.get("files", {}).values() if len(fl) > 1)
+            # store-backed scans record group count directly; legacy embed groups
+            groups = d.get("duplicate_groups")
+            if groups is None:
+                groups = sum(1 for fl in d.get("files", {}).values() if len(fl) > 1)
             out.append({
                 "scan_id": d.get("scan_id"),
                 "directories": d.get("directories") or d.get("directory"),
                 "saved_at": d.get("saved_at"),
                 "duplicate_groups": groups,
                 "duplicates_found": d.get("duplicates_found"),
+                "processed_files": d.get("processed_files"),
+                # a checkpoint written mid-scan is a usable but PARTIAL result
+                "partial": d.get("status") == "in_progress",
             })
         except (OSError, json.JSONDecodeError):
             continue
@@ -692,10 +885,9 @@ def load_persisted_scan(scan_id: str) -> bool:
             d = json.load(f)
     except (OSError, json.JSONDecodeError):
         return False
-    _scans[scan_id] = {
+    entry = {
         "status": "completed",
-        "files": d.get("files", {}),
-        "all_files": [f for fl in d.get("files", {}).values() for f in fl],
+        "files": d.get("files", {}),   # empty for store-backed; populated for legacy
         "directory": d.get("directory"),
         "directories": d.get("directories"),
         "started_at": d.get("started_at", 0),
@@ -703,7 +895,15 @@ def load_persisted_scan(scan_id: str) -> bool:
         "processed_files": d.get("processed_files", 0),
         "duplicates_found": d.get("duplicates_found", 0),
         "phase": "complete",
+        "store": None,
     }
+    # If a SQLite store exists for this scan, attach it (read from DB, no memory).
+    if scan_store.store_exists(scan_id):
+        try:
+            entry["store"] = scan_store.open_store(scan_id)
+        except Exception:
+            entry["store"] = None
+    _scans[scan_id] = entry
     return True
 
 

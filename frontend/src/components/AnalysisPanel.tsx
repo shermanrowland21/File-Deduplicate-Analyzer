@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { BedrockModel, FileMetadata } from '../types'
+import { DirectoryBrowser } from './DirectoryBrowser'
 
 export function AnalysisPanel() {
   const [models, setModels] = useState<BedrockModel[]>([])
@@ -10,6 +11,26 @@ export function AnalysisPanel() {
   const [analyzing, setAnalyzing] = useState(false)
   const [metadata, setMetadata] = useState<FileMetadata | null>(null)
   const [error, setError] = useState('')
+  const [showBrowser, setShowBrowser] = useState(false)
+  const [folderFiles, setFolderFiles] = useState<{ path: string; name: string }[]>([])
+  const [loadingFolder, setLoadingFolder] = useState(false)
+
+  // After picking a folder in the browser, load its files so the user can pick one.
+  const pickFolder = async (folder: string) => {
+    setShowBrowser(false)
+    setError(''); setLoadingFolder(true); setFolderFiles([])
+    try {
+      const res = await api.listFilesInFolder(folder, false)
+      setFolderFiles(res.files || [])
+      if (!res.files || res.files.length === 0) {
+        setError('No files directly in that folder (subfolders are not listed here).')
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to list folder')
+    } finally {
+      setLoadingFolder(false)
+    }
+  }
 
   useEffect(() => {
     loadModels()
@@ -63,13 +84,33 @@ export function AnalysisPanel() {
 
         <div className="form-group">
           <label>File Path</label>
-          <input
-            type="text"
-            value={filePath}
-            onChange={(e) => setFilePath(e.target.value)}
-            placeholder="C:\Users\username\Documents\some_file.pdf"
-            onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()}
-          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              value={filePath}
+              onChange={(e) => setFilePath(e.target.value)}
+              placeholder="Click Browse to pick a file, or paste a path"
+              onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()}
+              style={{ flex: 1 }}
+            />
+            <button className="btn btn-secondary" type="button"
+              onClick={() => setShowBrowser(true)} disabled={loadingFolder}>
+              {loadingFolder ? <><span className="spinner" /> Loading…</> : 'Browse…'}
+            </button>
+          </div>
+          {folderFiles.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                Pick a file from that folder ({folderFiles.length}):
+              </label>
+              <select value={filePath} onChange={(e) => setFilePath(e.target.value)}>
+                <option value="">— select a file —</option>
+                {folderFiles.map((f) => (
+                  <option key={f.path} value={f.path}>{f.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         <div className="form-group">
@@ -226,6 +267,13 @@ export function AnalysisPanel() {
             </div>
           )}
         </div>
+      )}
+
+      {showBrowser && (
+        <DirectoryBrowser
+          onSelect={(path) => pickFolder(path)}
+          onClose={() => setShowBrowser(false)}
+        />
       )}
     </div>
   )

@@ -9,6 +9,32 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# File-type GROUPS for per-type naming conventions. A file is classified into one
+# of these by extension; the UI lets you set a distinct naming convention per group
+# (with a "default" fallback for anything unmatched).
+FILE_TYPE_GROUPS: dict[str, set[str]] = {
+    "image":       {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".svg"},
+    "raw_image":   {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2"},
+    "video":       {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v", ".mpg", ".mpeg"},
+    "audio":       {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".wma"},
+    "document":    {".doc", ".docx", ".odt", ".rtf", ".txt", ".md", ".pages"},
+    "spreadsheet": {".xls", ".xlsx", ".xlsm", ".csv", ".tsv", ".ods", ".numbers"},
+    "presentation": {".ppt", ".pptx", ".odp", ".key"},
+    "pdf":         {".pdf"},
+    "graphic":     {".psd", ".ai", ".eps", ".indd", ".sketch", ".fig", ".xd", ".afphoto", ".afdesign"},
+    "archive":     {".zip", ".rar", ".7z", ".tar", ".gz"},
+}
+
+
+def classify_file_type(file_path: str) -> str:
+    """Return the file-type GROUP for a path (image/video/document/…) or 'default'
+    if the extension doesn't match a known group."""
+    ext = os.path.splitext(file_path)[1].lower()
+    for group, exts in FILE_TYPE_GROUPS.items():
+        if ext in exts:
+            return group
+    return "default"
+
 
 def apply_naming_convention(
     file_path: str,

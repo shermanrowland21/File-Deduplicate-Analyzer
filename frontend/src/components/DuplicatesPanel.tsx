@@ -1,13 +1,40 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { api } from '../api'
 import { DuplicatesResponse, DuplicateGroup } from '../types'
 
 interface DuplicatesPanelProps {
   duplicates: DuplicatesResponse | null
   scanId: string | null
+  scanning?: boolean
 }
 
-export function DuplicatesPanel({ duplicates, scanId }: DuplicatesPanelProps) {
+export function DuplicatesPanel({ duplicates: dupProp, scanId, scanning }: DuplicatesPanelProps) {
+  // A saved scan the user explicitly loaded here takes precedence over the
+  // live-session scan passed in as a prop (so persisted results are viewable
+  // after a restart / without a fresh scan).
+  const [loadedDup, setLoadedDup] = useState<DuplicatesResponse | null>(null)
+  const [savedScans, setSavedScans] = useState<any[]>([])
+  const [loadingScan, setLoadingScan] = useState(false)
+  const duplicates = loadedDup || dupProp
+
+  useEffect(() => {
+    // fetch the list of persisted scans so the user can pick one to view
+    api.listPersistedScans().then((r) => setSavedScans(r.scans || [])).catch(() => {})
+  }, [])
+
+  const loadSavedScan = async (sid: string) => {
+    if (!sid) { setLoadedDup(null); return }
+    setLoadingScan(true); setError('')
+    try {
+      const d = await api.getDuplicatesLimited(sid, 500)
+      setLoadedDup(d)
+    } catch (e: any) {
+      setError(e.message || 'Failed to load scan')
+    } finally {
+      setLoadingScan(false)
+    }
+  }
+
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [action, setAction] = useState('move_to_trash')
   const [moveToFolder, setMoveToFolder] = useState('')
@@ -37,13 +64,47 @@ export function DuplicatesPanel({ duplicates, scanId }: DuplicatesPanelProps) {
     }
   }, [duplicates])
 
+  const savedScanPicker = (
+    <div className="card">
+      <div className="card-header"><h3>Load a saved scan</h3></div>
+      <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+        View duplicates from any completed scan without re-scanning. Large scans load the
+        top 500 groups by wasted space.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select onChange={(e) => loadSavedScan(e.target.value)} defaultValue=""
+          style={{ flex: '1 1 360px' }}>
+          <option value="">— select a saved scan —</option>
+          {savedScans.map((s) => (
+            <option key={s.scan_id} value={s.scan_id}>
+              {(Array.isArray(s.directories) ? s.directories.join(' + ') : s.directories) || s.scan_id}
+              {' — '}{(s.duplicate_groups ?? 0).toLocaleString()} groups
+            </option>
+          ))}
+        </select>
+        {loadingScan && <span className="spinner" />}
+        {loadedDup && (
+          <button className="btn btn-secondary btn-sm" onClick={() => setLoadedDup(null)}>Clear</button>
+        )}
+      </div>
+    </div>
+  )
+
   if (!duplicates || duplicates.total_groups === 0) {
     return (
+      <div>
+        {savedScanPicker}
       <div className="empty-state">
-        {duplicates?.in_progress ? (
+        {scanning ? (
           <>
             <h3><span className="spinner" style={{ width: 16, height: 16, marginRight: 8, verticalAlign: 'middle' }} />Scan in progress…</h3>
-            <p>Duplicates will appear here as they're found. This list updates live.</p>
+            <p>The full duplicate list is loaded once the scan completes. On large
+            datasets it can be hundreds of thousands of rows, so we hold off
+            rendering it live to keep the app responsive.</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+              Watch live counts on the Scan tab. When the scan finishes, duplicates
+              appear here automatically.
+            </p>
           </>
         ) : (
           <>
@@ -51,6 +112,7 @@ export function DuplicatesPanel({ duplicates, scanId }: DuplicatesPanelProps) {
             <p>Scan a directory first to find duplicate files, or the last scan found no duplicates.</p>
           </>
         )}
+      </div>
       </div>
     )
   }
@@ -176,6 +238,12 @@ export function DuplicatesPanel({ duplicates, scanId }: DuplicatesPanelProps) {
 
   return (
     <div>
+      {savedScanPicker}
+      {duplicates.total_groups >= 500 && (
+        <div className="alert alert-warning" style={{ fontSize: '0.8rem' }}>
+          Showing the top 500 groups by wasted space. Use the Resolver to act on the full set.
+        </div>
+      )}
       {/* Summary Stats */}
       <div className="stats-grid">
         <div className="stat-card">

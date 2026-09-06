@@ -187,13 +187,18 @@ def read_file_for_analysis(file_path: str) -> dict:
 
 def analyze_file(
     file_path: str,
-    model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    model_id: Optional[str] = None,
     custom_prompt: Optional[str] = None,
 ) -> dict:
     """
     Analyze a file using AWS Bedrock and extract metadata.
     Returns structured metadata about the file content.
+    When model_id is None, resolves the user-configured "file_analysis" model
+    from the central Settings store (falls back to env/default).
     """
+    if model_id is None:
+        from . import settings_store
+        model_id = settings_store.get_model("file_analysis")
     client = get_bedrock_client()
     file_data = read_file_for_analysis(file_path)
     filename = os.path.basename(file_path)

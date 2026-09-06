@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search, archives, clientlog, resolver
+from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search, archives, clientlog, resolver, foldernamer, filenamer, settings, reconciler, md5index, purge, catalog
 
 app = FastAPI(
     title="File Deduplicate Analyzer",
@@ -37,6 +37,13 @@ app.include_router(visual_search.router, prefix="/api/visual", tags=["Visual Sea
 app.include_router(archives.router, prefix="/api/archives", tags=["Archives"])
 app.include_router(clientlog.router, prefix="/api/logs", tags=["Client Logs"])
 app.include_router(resolver.router, prefix="/api/resolver", tags=["Dedup Resolver"])
+app.include_router(foldernamer.router, prefix="/api/foldernamer", tags=["Folder Renamer"])
+app.include_router(filenamer.router, prefix="/api/filenamer", tags=["File Renamer"])
+app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
+app.include_router(reconciler.router, prefix="/api/reconciler", tags=["Folder Reconciler"])
+app.include_router(md5index.router, prefix="/api/md5index", tags=["MD5 Index"])
+app.include_router(purge.router, prefix="/api/purge", tags=["Find & Purge"])
+app.include_router(catalog.router, prefix="/api/catalog", tags=["Filesystem Catalog"])
 
 
 @app.get("/api/health")

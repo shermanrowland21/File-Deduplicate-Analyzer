@@ -123,6 +123,7 @@ class RenamePreview(BaseModel):
     original_name: str
     new_name: str
     new_path: str
+    type_group: Optional[str] = None  # which file-type convention was applied
 
 
 class BulkRenameRequest(BaseModel):

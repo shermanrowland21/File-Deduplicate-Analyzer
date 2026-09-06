@@ -13,9 +13,13 @@ from typing import Optional
 
 from .audio_extractor import extract_audio, extract_keyframes, get_media_info
 from .transcription import transcribe_audio
-from .visual_analyzer import analyze_frames_batch
+from .visual_analyzer import analyze_frames_batch, analyze_frame
 from .topic_extractor import extract_topics_from_transcript, generate_file_summary
 from . import metadata_store
+
+# Still-image types the pipeline can analyze directly (vision + OCR), in
+# addition to time-based media (video/audio).
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic"}
 
 # Track active pipeline jobs
 _jobs: dict = {}
@@ -90,6 +94,13 @@ def _run_pipeline(job_id: str, file_path: str, options: dict):
     max_frames = options.get("max_frames", 60)
     visual_model = options.get("visual_model")
     topic_model = options.get("topic_model", "anthropic.claude-3-5-haiku-20241022-v1:0")
+
+    # Still images take a dedicated branch: no audio/frames — just a direct
+    # vision analysis (description + OCR + objects), stored the same way so
+    # search + the File Renamer can use it exactly like video/audio analysis.
+    if Path(file_path).suffix.lower() in IMAGE_EXTS:
+        _run_image_pipeline(job, file_path, visual_model, topic_model)
+        return
 
     try:
         # Step 1: Get media info
@@ -251,6 +262,90 @@ def _run_pipeline(job_id: str, file_path: str, options: dict):
         job["progress"] = 100
         job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
 
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+        job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
+        if "file_id" in job:
+            metadata_store.set_analysis_status(job["file_id"], "error")
+
+
+def _run_image_pipeline(job: dict, file_path: str, visual_model, topic_model):
+    """Analyze a STILL IMAGE: one vision pass (description + OCR + objects),
+    stored as a visual segment + summary — same store shape as time-based media
+    so search and the File Renamer treat images and videos uniformly."""
+    try:
+        norm_path = file_path.replace("\\", "/")
+        try:
+            fsize = os.path.getsize(file_path)
+        except OSError:
+            fsize = 0
+        # dimensions (best-effort via Pillow)
+        w = h = 0
+        try:
+            from PIL import Image
+            with Image.open(file_path) as im:
+                w, h = im.size
+        except Exception:
+            pass
+
+        file_id = metadata_store.upsert_media_file(
+            file_path=norm_path,
+            filename=os.path.basename(file_path),
+            extension=Path(file_path).suffix.lower(),
+            mime_type=_guess_mime(file_path),
+            file_size=fsize,
+            duration_seconds=0,
+            width=w, height=h,
+            metadata={"media_kind": "image", "width": w, "height": h},
+        )
+        metadata_store.set_analysis_status(file_id, "processing")
+        job["file_id"] = file_id
+        job["phase"] = "analyzing_image"
+        job["progress"] = 40
+
+        # Vision pass: detailed description + OCR + objects.
+        analysis = analyze_frame(file_path, analysis_type="detailed",
+                                 model_id=visual_model)
+        description = analysis.get("description", "")
+        ocr_text = analysis.get("ocr_text", "")
+
+        metadata_store.add_visual_segments(file_id, [{
+            "timestamp": 0,
+            "frame_path": norm_path,
+            "description": description,
+            "ocr_text": ocr_text,
+            "objects": analysis.get("objects", []),
+            "scene_type": analysis.get("scene_type", ""),
+        }])
+        job["steps_completed"] = ["image_analysis"]
+        job["progress"] = 80
+
+        # Summary from the description + any OCR text, so images are searchable
+        # and nameable just like videos.
+        summary = generate_file_summary(
+            transcript_text=ocr_text,
+            visual_descriptions=[description] if description else [],
+            model_id=topic_model,
+        )
+        if not summary.get("error"):
+            metadata_store.upsert_media_file(
+                file_path=norm_path,
+                filename=os.path.basename(file_path),
+                extension=Path(file_path).suffix.lower(),
+                mime_type=_guess_mime(file_path),
+                file_size=fsize, duration_seconds=0, width=w, height=h,
+                metadata={"media_kind": "image", "width": w, "height": h,
+                          "summary": summary},
+            )
+            job["summary"] = summary
+            job["steps_completed"].append("summary")
+
+        metadata_store.set_analysis_status(file_id, "completed")
+        job["status"] = "completed"
+        job["phase"] = "complete"
+        job["progress"] = 100
+        job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)

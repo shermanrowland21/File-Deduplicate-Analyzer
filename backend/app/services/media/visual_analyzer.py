@@ -52,7 +52,9 @@ def analyze_frame(
     client = get_bedrock_client()
 
     if model_id is None:
-        model_id = VISUAL_MODELS.get(analysis_type, VISUAL_MODELS["detailed"])
+        from .. import settings_store
+        model_id = settings_store.get_model("media_visual") or \
+            VISUAL_MODELS.get(analysis_type, VISUAL_MODELS["detailed"])
 
     # Read and encode the frame
     with open(frame_path, "rb") as f:

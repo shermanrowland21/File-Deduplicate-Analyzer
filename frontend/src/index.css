@@ -17,6 +17,50 @@
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
+/* Light theme — applied when <html data-theme="light">. Every surface in the
+   app reads these variables, so overriding them here re-skins the whole UI. */
+:root[data-theme="light"] {
+  --bg-primary: #f5f7fa;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eef1f5;
+  --bg-hover: #e3e8ee;
+  --text-primary: #1a2027;
+  --text-secondary: #4b5563;
+  --text-muted: #8a94a3;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --danger: #dc2626;
+  --danger-hover: #b91c1c;
+  --success: #16a34a;
+  --warning: #d97706;
+  --border: #d7dde5;
+  --shadow: 0 2px 8px rgba(15, 23, 42, 0.1);
+}
+
+/* Smooth the switch so it doesn't flash. */
+body, .app-header, .sidebar, .card, .main-panel, input, select, textarea, button {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+/* Theme toggle button in the header. */
+.theme-toggle {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.theme-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 * {
   margin: 0;
   padding: 0;

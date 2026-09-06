@@ -3,6 +3,7 @@ Scanner router - handles directory scanning for duplicate detection.
 Scan runs in background; frontend polls /status/{scan_id} for progress.
 """
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from ..models.schemas import ScanRequest
 from ..services.file_scanner import scan_directory, get_scan_status, get_cache_info, clear_cache, cancel_scan, get_active_scan
 
@@ -17,6 +18,64 @@ async def active_scan():
     if status is None:
         return {"active": False}
     return {"active": True, **status}
+
+
+@router.post("/from-cache")
+async def build_from_cache(request: ScanRequest):
+    """Build a dedup-ready SQLite scan DIRECTLY from existing hash caches for the
+    given directories — no filesystem walk, no re-hashing. Instantly makes an
+    already-hashed tree (e.g. Dropbox) available for deduplication while a live
+    scan of other directories runs. Returns the new scan_id."""
+    from ..services.file_scanner import build_store_from_cache
+    directories = request.directories or ([request.directory] if request.directory else [])
+    if not directories:
+        raise HTTPException(status_code=400, detail="Provide 'directory' or 'directories'")
+    scan_id = build_store_from_cache(directories)
+    if scan_id is None:
+        raise HTTPException(status_code=404, detail="No hash cache found for those directories")
+    return {"scan_id": scan_id, "status": "completed", "source": "hash_cache"}
+
+
+class MergeRequest(BaseModel):
+    scan_ids: list[str]
+
+
+@router.post("/merge")
+async def merge_scans_endpoint(request: MergeRequest):
+    """Merge several finished scans into ONE unified scan for CROSS-SOURCE dedup
+    (e.g. Dropbox scan + Google Drive scan -> find files living in both). No
+    re-scan / re-hash. Returns the new merged scan_id; use it with the Resolver
+    or /api/duplicates/{scan_id}."""
+    from ..services.file_scanner import merge_scans
+    if not request.scan_ids or len(request.scan_ids) < 1:
+        raise HTTPException(status_code=400, detail="Provide scan_ids to merge")
+    result = merge_scans(request.scan_ids)
+    if result is None:
+        raise HTTPException(status_code=404, detail="None of the given scans have a store to merge")
+    return result
+
+
+@router.get("/persisted")
+async def persisted_scans():
+    """List completed/checkpointed scans saved to disk, newest first, so the UI
+    can offer 'resume last scan' without re-walking the filesystem."""
+    from ..services.file_scanner import list_persisted_scans, latest_scan_id
+    return {"latest": latest_scan_id(), "scans": list_persisted_scans()}
+
+
+@router.post("/resume/{scan_id}")
+async def resume_scan(scan_id: str):
+    """Load a previously persisted scan's results back into memory WITHOUT any
+    filesystem walk or re-hashing, and return its status. The duplicates are then
+    available via /api/duplicates/{scan_id}. This is the 'close & reopen, go
+    straight to duplicates' path."""
+    from ..services.file_scanner import load_persisted_scan, get_scan_status
+    if not load_persisted_scan(scan_id):
+        raise HTTPException(status_code=404, detail="No persisted scan with that id")
+    status = get_scan_status(scan_id)
+    if status is None:
+        raise HTTPException(status_code=500, detail="Failed to load persisted scan")
+    return {"resumed": True, **status}
 
 
 @router.post("/scan")

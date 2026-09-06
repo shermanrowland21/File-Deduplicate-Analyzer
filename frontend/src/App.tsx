@@ -3,17 +3,34 @@ import { track } from './telemetry'
 import { ScanPanel } from './components/ScanPanel'
 import { DuplicatesPanel } from './components/DuplicatesPanel'
 import { AnalysisPanel } from './components/AnalysisPanel'
-import { RenamingPanel } from './components/RenamingPanel'
+import { SmartRenamePanel } from './components/SmartRenamePanel'
 import { MediaPanel } from './components/MediaPanel'
 import { VisualSearchPanel } from './components/VisualSearchPanel'
 import { ExtractPanel } from './components/ExtractPanel'
 import { ResolverPanel } from './components/ResolverPanel'
+import { FolderRenamerPanel } from './components/FolderRenamerPanel'
+import { FolderReconcilerPanel } from './components/FolderReconcilerPanel'
+import { PurgeByNamePanel } from './components/PurgeByNamePanel'
+import { SettingsPanel } from './components/SettingsPanel'
 import { useScanJob } from './useScanJob'
 
-type View = 'scan' | 'duplicates' | 'resolver' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming'
+type View = 'scan' | 'duplicates' | 'resolver' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming' | 'folders' | 'reconciler' | 'purge' | 'settings'
 
 function App() {
   const [currentView, setCurrentView] = useState<View>('scan')
+
+  // Theme: 'dark' (default) or 'light'. Persisted to localStorage and applied
+  // to <html data-theme> so all the CSS variables re-skin the whole app.
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const saved = localStorage.getItem('theme')
+    return saved === 'light' ? 'light' : 'dark'
+  })
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('theme', theme)
+  }, [theme])
+  const toggleTheme = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'))
+
   // Scan job lives at the App level so it SURVIVES tab switches and keeps
   // polling in the background regardless of which view is shown.
   const scan = useScanJob()
@@ -49,12 +66,18 @@ function App() {
     <div className="app-container">
       <header className="app-header">
         <h1>File Deduplicate Analyzer</h1>
-        <span className="status">
-          {scan.progress
-            ? `${scan.scanning ? 'Scanning' : 'Last scan'}: ${scan.progress.directory}` +
-              (scan.scanning ? ` — ${scan.progress.processed_files.toLocaleString()} hashed, ${scan.progress.duplicates_found.toLocaleString()} dupes` : '')
-            : 'No scan active'}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <span className="status">
+            {scan.progress
+              ? `${scan.scanning ? 'Scanning' : 'Last scan'}: ${scan.progress.directory}` +
+                (scan.scanning ? ` — ${scan.progress.processed_files.toLocaleString()} hashed, ${scan.progress.duplicates_found.toLocaleString()} dupes` : '')
+              : 'No scan active'}
+          </span>
+          <button className="theme-toggle" onClick={toggleTheme}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
+            {theme === 'dark' ? '☀ Light' : '🌙 Dark'}
+          </button>
+        </div>
       </header>
 
       <div className="app-content">
@@ -87,6 +110,24 @@ function App() {
               Resolver
             </li>
             <li
+              className={currentView === 'folders' ? 'active' : ''}
+              onClick={() => setCurrentView('folders')}
+            >
+              Folder Renamer
+            </li>
+            <li
+              className={currentView === 'reconciler' ? 'active' : ''}
+              onClick={() => setCurrentView('reconciler')}
+            >
+              Folder Reconciler
+            </li>
+            <li
+              className={currentView === 'purge' ? 'active' : ''}
+              onClick={() => setCurrentView('purge')}
+            >
+              Find &amp; Purge
+            </li>
+            <li
               className={currentView === 'extract' ? 'active' : ''}
               onClick={() => setCurrentView('extract')}
             >
@@ -116,6 +157,12 @@ function App() {
             >
               Smart Rename
             </li>
+            <li
+              className={currentView === 'settings' ? 'active' : ''}
+              onClick={() => setCurrentView('settings')}
+            >
+              Settings
+            </li>
           </ul>
         </nav>
 
@@ -130,14 +177,19 @@ function App() {
             <DuplicatesPanel
               duplicates={duplicates}
               scanId={scan.progress?.scan_id || null}
+              scanning={scan.scanning}
             />
           )}
           {currentView === 'resolver' && <ResolverPanel />}
+          {currentView === 'folders' && <FolderRenamerPanel />}
+          {currentView === 'reconciler' && <FolderReconcilerPanel />}
+          {currentView === 'purge' && <PurgeByNamePanel />}
+          {currentView === 'settings' && <SettingsPanel />}
           {currentView === 'extract' && <ExtractPanel />}
           {currentView === 'media' && <MediaPanel />}
           {currentView === 'visual' && <VisualSearchPanel />}
           {currentView === 'analysis' && <AnalysisPanel />}
-          {currentView === 'renaming' && <RenamingPanel />}
+          {currentView === 'renaming' && <SmartRenamePanel />}
         </main>
       </div>
     </div>

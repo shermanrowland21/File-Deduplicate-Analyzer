@@ -20,6 +20,7 @@ export function DirectoryBrowser({ onSelect, onClose }: DirectoryBrowserProps) {
   const [fileCount, setFileCount] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [filter, setFilter] = useState('')
 
   useEffect(() => {
     loadDrives()
@@ -59,6 +60,7 @@ export function DirectoryBrowser({ onSelect, onClose }: DirectoryBrowserProps) {
   const navigateTo = async (path: string) => {
     setLoading(true)
     setError('')
+    setFilter('')   // reset the folder filter when entering a new directory
     try {
       const res = await fetch(`/api/browser/list?path=${encodeURIComponent(path)}`)
       if (!res.ok) {
@@ -125,6 +127,20 @@ export function DirectoryBrowser({ onSelect, onClose }: DirectoryBrowserProps) {
 
         {error && <div className="alert alert-error" style={{ margin: '8px 16px' }}>{error}</div>}
 
+        {/* Filter box — type to instantly narrow the folders in this directory */}
+        {directories.length > 0 && (
+          <div style={{ padding: '0 16px 8px' }}>
+            <input
+              type="text"
+              value={filter}
+              autoFocus
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder={`Filter ${directories.length} folders… (e.g. "jessica")`}
+              style={{ width: '100%' }}
+            />
+          </div>
+        )}
+
         {/* Directory Listing */}
         <div className="dir-browser-list">
           {/* Up button */}
@@ -138,16 +154,31 @@ export function DirectoryBrowser({ onSelect, onClose }: DirectoryBrowserProps) {
             </div>
           )}
 
-          {loading ? (
-            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
-              <span className="spinner" /> Loading...
-            </div>
-          ) : directories.length === 0 ? (
-            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
-              No subdirectories
-            </div>
-          ) : (
-            directories.map((dir) => (
+          {(() => {
+            const q = filter.trim().toLowerCase()
+            const shown = q ? directories.filter((d) => d.name.toLowerCase().includes(q)) : directories
+            if (loading) {
+              return (
+                <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
+                  <span className="spinner" /> Loading...
+                </div>
+              )
+            }
+            if (directories.length === 0) {
+              return (
+                <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
+                  No subdirectories
+                </div>
+              )
+            }
+            if (shown.length === 0) {
+              return (
+                <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
+                  No folders match "{filter}"
+                </div>
+              )
+            }
+            return shown.map((dir) => (
               <div
                 key={dir.path}
                 className="dir-entry"
@@ -158,7 +189,7 @@ export function DirectoryBrowser({ onSelect, onClose }: DirectoryBrowserProps) {
                 {dir.has_children && <span className="dir-arrow">›</span>}
               </div>
             ))
-          )}
+          })()}
         </div>
 
         {/* Footer with select button */}

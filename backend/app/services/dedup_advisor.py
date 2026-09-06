@@ -23,7 +23,10 @@ from .bedrock_client import get_bedrock_client
 from .content_reader import read_content
 from .file_scanner import get_duplicates, human_readable_size
 
-DEFAULT_MODEL = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+from . import settings_store
+
+def _default_model() -> str:
+    return settings_store.get_model("dedup_advisor")
 
 _advice_cache: dict = {}   # group_hash -> advice dict
 
