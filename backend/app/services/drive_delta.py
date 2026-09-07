@@ -421,12 +421,51 @@ def _fetch_paths(source_kind: str, source_id: str, admin_user: str, label: str) 
     return {fid: build_path(fid) for fid in nodes}
 
 
+_HASH_BATCH = int(os.environ.get("DELTA_HASH_BATCH", "300"))
+
+
 def _apply_worker(job_id, report_file, admin_user, do_downloads, do_deletions):
+    from . import md5_index as mi
     job = _apply_jobs[job_id]
     # Every absolute path we WRITE into Organized, so we can hash exactly those
-    # afterward (targeted, no full-tree re-walk).
+    # (targeted, no full-tree re-walk). Hashed INCREMENTALLY as files arrive so an
+    # interrupted run still indexes what it got and the index stays current.
     downloaded_paths: list[str] = []
     job["downloaded_paths_file"] = None
+    job["hashed"] = 0
+    _pending_hash: list[str] = []
+
+    def _write_downloaded_manifest():
+        if not downloaded_paths:
+            return
+        os.makedirs(DELTA_DIR, exist_ok=True)
+        dl_file = os.path.join(DELTA_DIR, f"{job_id}_downloaded.json")
+        try:
+            tmp = dl_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"paths": downloaded_paths, "at": time.time()}, f,
+                          ensure_ascii=False)
+            os.replace(tmp, dl_file)
+            job["downloaded_paths_file"] = dl_file
+        except OSError as e:
+            job["errors"].append(f"write downloaded list: {e}")
+
+    def _flush_hash(force=False):
+        """Hash the pending batch into the Organized index (incremental)."""
+        if not _pending_hash:
+            return
+        if not force and len(_pending_hash) < _HASH_BATCH:
+            return
+        batch = list(_pending_hash)
+        _pending_hash.clear()
+        try:
+            hs = mi.index_paths(ORGANIZED_ROOT, batch, min_size=0)
+            job["hashed"] = job.get("hashed", 0) + hs.get("hashed", 0)
+            job["hash_stats"] = {"hashed": job["hashed"]}
+        except Exception as e:
+            job["errors"].append(f"incremental hash: {e}")
+        _write_downloaded_manifest()
+
     try:
         with open(report_file, "r", encoding="utf-8") as f:
             report = json.load(f)
@@ -480,10 +519,12 @@ def _apply_worker(job_id, report_file, admin_user, do_downloads, do_deletions):
                             try:
                                 after = set(os.listdir(target_dir))
                                 for new_name in (after - before):
-                                    downloaded_paths.append(
-                                        os.path.abspath(os.path.join(target_dir, new_name)))
+                                    ap = os.path.abspath(os.path.join(target_dir, new_name))
+                                    downloaded_paths.append(ap)
+                                    _pending_hash.append(ap)
                             except OSError:
                                 pass
+                            _flush_hash()   # hash a batch once enough have piled up
                         elif status == "throttled":
                             job["throttled"] = job.get("throttled", 0) + 1
                             job["download_failed"] += 1
@@ -528,28 +569,11 @@ def _apply_worker(job_id, report_file, admin_user, do_downloads, do_deletions):
                     else:
                         job["delete_missing_local"] += 1
 
-        # Persist the list of downloaded paths (inspectable + reusable).
-        if downloaded_paths:
-            os.makedirs(DELTA_DIR, exist_ok=True)
-            dl_file = os.path.join(DELTA_DIR, f"{job_id}_downloaded.json")
-            try:
-                with open(dl_file, "w", encoding="utf-8") as f:
-                    json.dump({"paths": downloaded_paths, "at": time.time()},
-                              f, ensure_ascii=False, indent=2)
-                job["downloaded_paths_file"] = dl_file
-            except OSError as e:
-                job["errors"].append(f"write downloaded list: {e}")
-
-        # TARGETED HASH: index exactly what we downloaded (no full-tree walk),
-        # so dedup/reconstruct see the new files immediately.
-        if downloaded_paths and not job.get("cancelled"):
-            job["phase"] = "hashing_new"
-            try:
-                from . import md5_index as mi
-                hstats = mi.index_paths(ORGANIZED_ROOT, downloaded_paths, min_size=0)
-                job["hash_stats"] = hstats
-            except Exception as e:
-                job["errors"].append(f"targeted hash: {e}")
+        # Final hash of any remaining downloaded files + persist the full list.
+        # (Most were already hashed incrementally in batches during the run.)
+        job["phase"] = "hashing_new"
+        _flush_hash(force=True)
+        _write_downloaded_manifest()
 
         if not job.get("cancelled"):
             job["phase"] = "complete"

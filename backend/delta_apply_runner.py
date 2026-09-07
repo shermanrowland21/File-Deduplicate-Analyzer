@@ -56,6 +56,8 @@ def main():
             "converted": job.get("converted"),
             "download_failed": job.get("download_failed"),
             "quarantined": job.get("quarantined"),
+            "hashed": job.get("hashed"),
+            "throttled": job.get("throttled"),
             "downloaded_paths_count": job.get("downloaded_paths_count"),
             "downloaded_paths_file": job.get("downloaded_paths_file"),
             "hash_stats": job.get("hash_stats"),
