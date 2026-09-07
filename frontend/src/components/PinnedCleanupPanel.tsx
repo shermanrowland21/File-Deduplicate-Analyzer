@@ -18,8 +18,17 @@ export function PinnedCleanupPanel() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const [qManifest, setQManifest] = useState<string | null>(null)
-  const [rManifest, setRManifest] = useState<string | null>(null)
+  // Persist manifests so Undo survives a page reload.
+  const [qManifest, setQManifestState] = useState<string | null>(() => localStorage.getItem('pinned-q-manifest'))
+  const [rManifest, setRManifestState] = useState<string | null>(() => localStorage.getItem('pinned-r-manifest'))
+  const setQManifest = (m: string | null) => {
+    setQManifestState(m)
+    if (m) localStorage.setItem('pinned-q-manifest', m); else localStorage.removeItem('pinned-q-manifest')
+  }
+  const setRManifest = (m: string | null) => {
+    setRManifestState(m)
+    if (m) localStorage.setItem('pinned-r-manifest', m); else localStorage.removeItem('pinned-r-manifest')
+  }
   const [job, setJob] = useState<any>(null)
   const [jobId, setJobId] = useState<string | null>(null)
   const qPoll = useState<{ id: number | null }>({ id: null })[0]
@@ -147,6 +156,8 @@ export function PinnedCleanupPanel() {
               <button className="btn btn-secondary" onClick={runRename} disabled={busy || !preview.unique_count}>
                 Rename {num(preview.unique_count)} unique
               </button>
+              {qManifest && !jobId && <button className="btn btn-secondary" onClick={() => undo('q')} title="Restore the last quarantine batch">↩ Undo quarantine</button>}
+              {rManifest && <button className="btn btn-secondary" onClick={() => undo('r')} title="Restore the last rename batch">↩ Undo rename</button>}
               <button className="btn btn-secondary btn-sm" onClick={load} disabled={busy || loading}>Refresh</button>
             </div>
           </>

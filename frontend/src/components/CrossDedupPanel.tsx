@@ -33,7 +33,15 @@ export function CrossDedupPanel() {
   const [notice, setNotice] = useState('')
   const [job, setJob] = useState<any>(null)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
-  const [manifest, setManifest] = useState<string | null>(null)
+  // Persist the last purge manifest so the Undo button survives a page reload.
+  const [manifest, setManifestState] = useState<string | null>(
+    () => localStorage.getItem('crossdedup-last-manifest')
+  )
+  const setManifest = (m: string | null) => {
+    setManifestState(m)
+    if (m) localStorage.setItem('crossdedup-last-manifest', m)
+    else localStorage.removeItem('crossdedup-last-manifest')
+  }
   const pollRef = useState<{ id: number | null }>({ id: null })[0]
 
   const load = async (newOffset = 0, ff = filter) => {
@@ -156,6 +164,11 @@ export function CrossDedupPanel() {
           </button>
           {running && (
             <button className="btn btn-secondary" onClick={cancelPurge}>Cancel</button>
+          )}
+          {manifest && !running && (
+            <button className="btn btn-secondary" onClick={undoLast} title="Restore the last quarantine batch">
+              ↩ Undo last purge
+            </button>
           )}
         </div>
       </div>
