@@ -40,11 +40,21 @@ const TYPE_LABELS: Record<string, string> = {
   audio: 'Audio', document: 'Word / docs', spreadsheet: 'Excel / sheets',
   presentation: 'Slides', pdf: 'PDF', graphic: 'Graphics (PSD/AI)', archive: 'Archives',
 }
+// Default to a clean, space-separated style (no underscores). The user can change
+// the separator + how spaces are handled in the UI below.
 const defaultConv = (): NamingConvention => ({
-  template: '{date}_{category}_{suggested_name}.{ext}',
-  date_format: '%Y-%m-%d', separator: '_', case: 'lower',
-  max_length: 255, replace_spaces_with: '_',
+  template: '{date} {suggested_name}.{ext}',
+  date_format: '%Y-%m-%d', separator: ' ', case: 'lower',
+  max_length: 255, replace_spaces_with: ' ',
 })
+
+// Options for the separator + space-handling pickers.
+const SEP_OPTIONS: { value: string; label: string }[] = [
+  { value: ' ', label: 'Space  (my report.pdf)' },
+  { value: '-', label: 'Hyphen  (my-report.pdf)' },
+  { value: '_', label: 'Underscore  (my_report.pdf)' },
+  { value: '', label: 'None  (myreport.pdf)' },
+]
 
 export function SmartRenamePanel() {
   const [directory, setDirectory] = useState('')
@@ -210,7 +220,37 @@ export function SmartRenamePanel() {
                   </button>
                 ))}
               </div>
-              <NamingBuilder key={activeType} template={convention.template} separator={convention.separator}
+              {/* Separator + space handling — this is what controls underscores. */}
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 10 }}>
+                <label style={{ fontSize: '0.8rem' }}>
+                  Separator between parts:{' '}
+                  <select value={convention.separator}
+                    onChange={e => setConvention({ ...convention, separator: e.target.value })}
+                    style={{ marginLeft: 4 }}>
+                    {SEP_OPTIONS.map(o => <option key={o.value || 'none'} value={o.value}>{o.label}</option>)}
+                  </select>
+                </label>
+                <label style={{ fontSize: '0.8rem' }}>
+                  Spaces in names become:{' '}
+                  <select value={convention.replace_spaces_with}
+                    onChange={e => setConvention({ ...convention, replace_spaces_with: e.target.value })}
+                    style={{ marginLeft: 4 }}>
+                    {SEP_OPTIONS.map(o => <option key={o.value || 'none'} value={o.value}>{o.label}</option>)}
+                  </select>
+                </label>
+                <label style={{ fontSize: '0.8rem' }}>
+                  Case:{' '}
+                  <select value={convention.case}
+                    onChange={e => setConvention({ ...convention, case: e.target.value as any })}
+                    style={{ marginLeft: 4 }}>
+                    <option value="lower">lowercase</option>
+                    <option value="upper">UPPERCASE</option>
+                    <option value="title">Title Case</option>
+                    <option value="none">Keep as-is</option>
+                  </select>
+                </label>
+              </div>
+              <NamingBuilder key={activeType + convention.separator} template={convention.template} separator={convention.separator}
                 onChange={(tpl) => setConvention({ ...convention, template: tpl })} />
             </div>
           )}
