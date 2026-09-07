@@ -1,20 +1,13 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { api } from '../api'
-import VoiceInput from './VoiceInput'
 
 /**
- * Reusable voice-driven keeper-guidance chat for dedup screens.
- *
- * You speak (or type) criteria like "prefer files under Social Media Marketing"
- * or "never keep a copy in someone's transferred files folder". Bedrock turns it
- * into a keeper RULE, reflects back what it understood, and on confirm applies
- * the rule (keepers re-selected instantly across all groups). A separate action
- * hands the still-ambiguous groups to AI for per-file judgment.
- *
- * Props let it drive whichever panel embeds it:
- *  - onRuleApplied: called after a rule is applied so the panel reloads the list
- *  - ambiguousCount: current count of groups the rule can't decide
- *  - resolveOpts: passed to the AI ambiguity resolver
+ * Voice-driven keeper-guidance chat for dedup screens. Composer visuals mirror
+ * the AI-Research-Cowork app: one rounded input bar, auto-grow textarea, inline
+ * mic + send on the right, and a live recording state (transcript + waveform +
+ * accept/discard). You speak criteria; Bedrock turns them into a keeper RULE,
+ * reflects it back, and on confirm applies it (keepers re-select instantly).
+ * A separate action hands still-ambiguous groups to AI for per-file judgment.
  */
 interface Msg { role: 'user' | 'assistant'; content: string }
 
@@ -22,34 +15,39 @@ export function KeeperGuidanceChat({
   onRuleApplied,
   ambiguousCount = 0,
   resolveOpts,
+  placeholder = 'Tell me which copy to keep…',
 }: {
   onRuleApplied: () => void
   ambiguousCount?: number
   resolveOpts: { preferFolder?: string; snapshotOnly?: boolean }
+  placeholder?: string
 }) {
-  const [messages, setMessages] = useState<Msg[]>([{
-    role: 'assistant',
-    content:
-      "Tell me how to choose which copy to KEEP. For example: “prefer files under " +
-      "Social Media Marketing over Cutting videos,” or “never keep a copy in a " +
-      "person’s transferred-files folder,” or “keep the newest.” I’ll reflect it " +
-      "back and apply it — you’ll see the keepers change.",
-  }])
-  const [draft, setDraft] = useState('')
+  const [messages, setMessages] = useState<Msg[]>([])
+  const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [proposal, setProposal] = useState<{ patch: Record<string, any>; understanding: string; question: string } | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [proposal, setProposal] = useState<{ patch: Record<string, any>; question: string } | null>(null)
   const [lastGuidance, setLastGuidance] = useState('')
   const [error, setError] = useState('')
+
   const scrollRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const waveRef = useRef<HTMLCanvasElement>(null)
+  const recRef = useRef<any>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const rafRef = useRef<number | null>(null)
+  const transcriptRef = useRef('')
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
 
-  const send = async (text?: string) => {
-    const msg = (text ?? draft).trim()
+  const send = useCallback(async (text?: string) => {
+    const msg = (text ?? input).trim()
     if (!msg || busy) return
-    setError(''); setDraft(''); setLastGuidance(msg)
+    setError(''); setInput(''); setLastGuidance(msg)
+    if (inputRef.current) inputRef.current.style.height = 'auto'
     const history = messages.map(m => ({ role: m.role, content: m.content }))
     setMessages(m => [...m, { role: 'user', content: msg }])
     setBusy(true)
@@ -57,7 +55,7 @@ export function KeeperGuidanceChat({
       const r = await api.crossdedupGuidanceChat(msg, history)
       setMessages(m => [...m, { role: 'assistant', content: r.understanding || 'Understood.' }])
       if (r.rule_patch && Object.keys(r.rule_patch).length > 0) {
-        setProposal({ patch: r.rule_patch, understanding: r.understanding, question: r.clarifying_question || '' })
+        setProposal({ patch: r.rule_patch, question: r.clarifying_question || '' })
       } else {
         setProposal(null)
       }
@@ -67,7 +65,7 @@ export function KeeperGuidanceChat({
     } finally {
       setBusy(false)
     }
-  }
+  }, [input, busy, messages])
 
   const applyRule = async () => {
     if (!proposal) return
@@ -97,29 +95,104 @@ export function KeeperGuidanceChat({
     }
   }
 
+  // ---- voice (Web Speech API + live waveform) ----
+  useEffect(() => {
+    if (!recording) return
+    let dead = false
+    const canvas = waveRef.current
+    if (!canvas) return
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      if (dead) { stream.getTracks().forEach(t => t.stop()); return }
+      streamRef.current = stream
+      const actx = new (window.AudioContext || (window as any).webkitAudioContext)()
+      audioCtxRef.current = actx
+      const src = actx.createMediaStreamSource(stream)
+      const an = actx.createAnalyser(); an.fftSize = 256; an.smoothingTimeConstant = 0.5
+      src.connect(an)
+      const buf = new Float32Array(an.fftSize)
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4f9cf7'
+      const ctx = canvas.getContext('2d')!
+      const rect = canvas.getBoundingClientRect()
+      canvas.width = rect.width * 2; canvas.height = rect.height * 2
+      const w = canvas.width, h = canvas.height, midY = h / 2
+      const barW = 3, gap = 1, step = barW + gap
+      const maxBars = Math.floor(w / step)
+      const bars: number[] = []
+      const draw = () => {
+        if (dead) return
+        rafRef.current = requestAnimationFrame(draw)
+        an.getFloatTimeDomainData(buf)
+        let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
+        bars.push(Math.min(Math.sqrt(sum / buf.length) * 6, 1))
+        if (bars.length > maxBars) bars.shift()
+        ctx.clearRect(0, 0, w, h)
+        ctx.fillStyle = accent
+        const startX = w - bars.length * step
+        for (let i = 0; i < bars.length; i++) {
+          const bh = Math.max(bars[i] * (h - 4), 2)
+          ctx.fillRect(startX + i * step, midY - bh / 2, barW, bh)
+        }
+      }
+      draw()
+    }).catch(() => {})
+    return () => {
+      dead = true
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
+      if (audioCtxRef.current) audioCtxRef.current.close().catch(() => {})
+      streamRef.current = null; audioCtxRef.current = null; rafRef.current = null
+    }
+  }, [recording])
+
+  const startVoice = () => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) { setError('Voice needs Chrome or Edge.'); return }
+    transcriptRef.current = ''; setInput('')
+    const rec = new SR(); rec.continuous = true; rec.interimResults = true
+    rec.lang = localStorage.getItem('dedup-language') || 'en-US'
+    rec.onresult = (ev: any) => {
+      let f = '', i = ''
+      for (let x = 0; x < ev.results.length; x++) {
+        if (ev.results[x].isFinal) f += ev.results[x][0].transcript
+        else i += ev.results[x][0].transcript
+      }
+      transcriptRef.current = f + i; setInput(f + i)
+    }
+    rec.onend = () => { if (recRef.current === rec) try { rec.start() } catch { /* */ } }
+    rec.onerror = (e: any) => { if (e.error !== 'no-speech' && e.error !== 'aborted') { recRef.current = null; setRecording(false) } }
+    recRef.current = rec; setRecording(true)
+    try { rec.start() } catch { setRecording(false) }
+  }
+  const acceptVoice = () => {
+    if (recRef.current) try { recRef.current.stop() } catch { /* */ }
+    recRef.current = null; setRecording(false)
+    setTimeout(() => inputRef.current?.focus(), 50)
+  }
+  const discardVoice = () => {
+    if (recRef.current) try { recRef.current.stop() } catch { /* */ }
+    recRef.current = null; setInput(''); transcriptRef.current = ''; setRecording(false)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      if (recording) acceptVoice(); else send()
+    }
+  }
+
   return (
     <div className="card">
       <div className="card-header"><h3>Keeper guidance</h3></div>
       {error && <div className="alert alert-error">{error}</div>}
 
-      <div ref={scrollRef} style={{
-        maxHeight: 220, overflowY: 'auto', border: '1px solid var(--border)',
-        borderRadius: 'var(--radius)', padding: 10, background: 'var(--bg-primary)',
-        display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10,
-      }}>
-        {messages.map((m, i) => (
-          <div key={i} style={{
-            alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-            maxWidth: '85%', padding: '7px 11px', borderRadius: 12, fontSize: '0.84rem',
-            background: m.role === 'user' ? 'var(--accent)' : 'var(--bg-tertiary)',
-            color: m.role === 'user' ? '#fff' : 'var(--text-primary)',
-            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-          }}>{m.content}</div>
-        ))}
-        {busy && <div style={{ alignSelf: 'flex-start', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-          <span className="spinner" style={{ width: 12, height: 12, verticalAlign: 'middle', marginRight: 6 }} />thinking…
-        </div>}
-      </div>
+      {messages.length > 0 && (
+        <div ref={scrollRef} className="guidance-transcript">
+          {messages.map((m, i) => (
+            <div key={i} className={`guidance-bubble ${m.role}`}>{m.content}</div>
+          ))}
+          {busy && <div className="guidance-bubble assistant"><span className="spinner" style={{ width: 12, height: 12, verticalAlign: 'middle', marginRight: 6 }} />thinking…</div>}
+        </div>
+      )}
 
       {proposal && (
         <div className="alert" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--accent)', display: 'block' }}>
@@ -137,21 +210,53 @@ export function KeeperGuidanceChat({
         </div>
       )}
 
-      <div style={{ position: 'relative', display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-        <textarea value={draft} onChange={e => setDraft(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-          placeholder="Speak or type your keeper guidance…" rows={2}
-          style={{ flex: 1, fontSize: '0.84rem', resize: 'vertical' }} disabled={busy} />
-        <VoiceInput onTranscript={t => setDraft(t)} onSubmit={() => send()} disabled={busy} />
-        <button className="btn btn-primary" onClick={() => send()} disabled={busy || !draft.trim()}>Send</button>
-      </div>
-
-      {ambiguousCount > 0 && (
-        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.8rem' }}>
-          <span style={{ color: 'var(--warning)' }}>{ambiguousCount.toLocaleString()} groups the rule can’t decide</span>
-          <button className="btn btn-secondary btn-sm" onClick={resolveAmbiguous} disabled={busy}>Let AI decide these</button>
+      {/* Composer — mirrors the AI-Research-Cowork input bar */}
+      <div className="input-bar">
+        <div className="input-box">
+          {recording ? (
+            <>
+              <div className="voice-transcript">{input || <span className="voice-listening">Listening…</span>}</div>
+              <div className="voice-bar-row">
+                <canvas ref={waveRef} className="input-waveform" />
+                <button className="btn-voice-discard" onClick={discardVoice} title="Discard">&times;</button>
+                <button className="btn-voice-accept" onClick={acceptVoice} title="Accept">&#x2713;</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={e => {
+                  setInput(e.target.value)
+                  const el = e.target; el.style.height = 'auto'
+                  el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+                }}
+                onKeyDown={handleKeyDown}
+                placeholder={placeholder}
+                rows={1}
+                disabled={busy}
+              />
+              <div className="input-bar-footer">
+                <div className="input-bar-left">
+                  {ambiguousCount > 0 && (
+                    <button className="chip-ambiguous" onClick={resolveAmbiguous} disabled={busy}
+                      title="Let AI decide the groups the rule couldn't">
+                      {ambiguousCount.toLocaleString()} unresolved · let AI decide
+                    </button>
+                  )}
+                </div>
+                <div className="input-bar-right">
+                  <button className="btn-mic" onClick={startVoice} disabled={busy} title="Voice input">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm-1-9a1 1 0 1 1 2 0v6a1 1 0 1 1-2 0V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" /></svg>
+                  </button>
+                  {input.trim() && <button className="btn-send" onClick={() => send()} disabled={busy} title="Send">&#x2191;</button>}
+                </div>
+              </div>
+            </>
+          )}
         </div>
-      )}
+      </div>
     </div>
   )
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api'
+import { KeeperGuidanceChat } from './KeeperGuidanceChat'
 
 /**
  * -pinned Takeout artifact cleanup (within Organized only).
@@ -163,6 +164,15 @@ export function PinnedCleanupPanel() {
           </>
         )}
       </div>
+
+      {preview && (
+        <KeeperGuidanceChat
+          onRuleApplied={load}
+          ambiguousCount={0}
+          resolveOpts={{ preferFolder: 'organized', snapshotOnly: false }}
+          placeholder="Tell me which copy to keep — e.g. “keep the copy in the more specific folder, not the generic one”…"
+        />
+      )}
 
       {preview?.redundant_examples?.length > 0 && (
         <div className="card">

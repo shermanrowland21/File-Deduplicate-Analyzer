@@ -1362,38 +1362,57 @@ def _pinned_clean_name(path: str) -> str:
 
 
 def _scan_pinned() -> dict:
-    """Build md5->paths from the Organized index, then classify every -pinned file
-    as 'redundant' (has a non-pinned identical twin) or 'unique' (no twin)."""
+    """Build md5->paths from the Organized index, then choose a FOLDER-AWARE keeper
+    per content group. Any group containing a -pinned file yields: the non-keeper
+    copies (quarantine) and, if the keeper is itself -pinned, a clean rename."""
     idx = mi.open_index(_ORGANIZED_ROOT)
     by_md5: dict = {}
+    meta: dict = {}   # path -> (size, mtime) for folder-aware tiebreakers
     try:
-        for path, md5 in idx._conn.execute("SELECT path, md5 FROM files WHERE md5<>''"):
+        for path, md5, size, mtime in idx._conn.execute(
+                "SELECT path, md5, size, mtime FROM files WHERE md5<>''"):
             by_md5.setdefault(md5, []).append(path)
+            meta[path] = (size or 0, mtime or 0)
     finally:
         idx.close()
 
-    redundant = []   # {path, keeper, md5}  -> quarantine (twin exists)
-    unique = []      # {path, clean_name, md5} -> rename (sole copy)
+    # Keeper choice is FOLDER-AWARE (not name-based): a -pinned copy often lives
+    # in the meaningful folder while the clean twin sits in a generic dump. We
+    # reuse the crossdedup keeper rule + AI overrides so the user can guide which
+    # LOCATION wins. Whatever the keeper is, the OTHER copies are quarantined; if
+    # the surviving keeper still carries the -pinned suffix, it gets renamed clean.
+    from . import crossdedup as cd
+    rule = dict(cd.get_rule())
+    rule["prefer_folder"] = "organized"   # all these are within Organized
+
+    redundant = []   # {path, keeper, md5}  -> quarantine (the losing copy)
+    unique = []      # {path, clean_name, md5} -> rename the surviving -pinned keeper
     for md5, paths in by_md5.items():
         pinned = [p for p in paths if _is_pinned_name(p)]
         if not pinned:
             continue
-        non_pinned = [p for p in paths if not _is_pinned_name(p)]
-        if non_pinned:
-            # keeper: cleanest/shortest non-pinned copy
-            keeper = sorted(non_pinned, key=lambda p: (len(p), len(os.path.basename(p))))[0]
-            for pp in pinned:
-                redundant.append({"path": pp, "keeper": keeper, "md5": md5})
+
+        # candidate copies (as crossdedup-style dicts) for the rule/override
+        copies = [{"path": p, "folder": "organized",
+                   "size": meta.get(p, (0, 0))[0], "mtime": meta.get(p, (0, 0))[1]}
+                  for p in paths]
+        ov = cd._ai_overrides.get(md5)
+        keeper_path = None
+        if ov and any(c["path"] == ov for c in copies):
+            keeper_path = ov
         else:
-            # no clean twin; if multiple pinned copies, keep one and the rest are
-            # redundant against it; the survivor gets renamed.
-            survivor = sorted(pinned, key=lambda p: (len(p), len(os.path.basename(p))))[0]
-            for pp in pinned:
-                if pp == survivor:
-                    unique.append({"path": pp, "clean_name": _pinned_clean_name(pp),
-                                   "md5": md5})
-                else:
-                    redundant.append({"path": pp, "keeper": survivor, "md5": md5})
+            k, _amb = cd._pick_keeper(copies, "organized", rule)
+            keeper_path = k["path"]
+
+        # every non-keeper copy is redundant (quarantine)
+        for p in paths:
+            if p != keeper_path:
+                redundant.append({"path": p, "keeper": keeper_path, "md5": md5})
+
+        # if the surviving keeper is itself a -pinned artifact, clean its name
+        if _is_pinned_name(keeper_path):
+            unique.append({"path": keeper_path,
+                           "clean_name": _pinned_clean_name(keeper_path), "md5": md5})
     return {"redundant": redundant, "unique": unique}
 
 

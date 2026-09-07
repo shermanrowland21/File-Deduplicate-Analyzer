@@ -1140,3 +1140,140 @@ body {
 .mic-submit:hover {
   background: var(--accent-hover);
 }
+
+/* ------------------------------------------------------------------ */
+/* Keeper-guidance composer — mirrors the AI-Research-Cowork input bar. */
+/* Themed via app CSS variables (light + dark).                        */
+/* ------------------------------------------------------------------ */
+.guidance-transcript {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.guidance-bubble {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 14px;
+  font-size: 0.86rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+}
+.guidance-bubble.user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+}
+.guidance-bubble.assistant {
+  align-self: flex-start;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* The input bar */
+.input-bar { width: 100%; }
+
+.input-box {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-secondary);
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  transition: border-color 0.15s ease;
+}
+.input-box:focus-within {
+  border-color: var(--accent);
+}
+
+.input-box textarea {
+  width: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-family: inherit;
+  line-height: 1.5;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.input-box textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.input-bar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  gap: 8px;
+}
+.input-bar-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.input-bar-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.chip-ambiguous {
+  background: transparent;
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip-ambiguous:hover:not(:disabled) { background: var(--bg-hover); }
+.chip-ambiguous:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.input-box .btn-mic,
+.input-box .btn-send {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.input-box .btn-mic {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+.input-box .btn-mic:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.input-box .btn-send {
+  background: var(--accent);
+  color: #fff;
+  font-size: 1.1rem;
+}
+.input-box .btn-send:hover:not(:disabled) { background: var(--accent-hover); }
+.input-box .btn-mic:disabled, .input-box .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Recording state */
+.voice-transcript {
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  min-height: 1.4em;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+.voice-listening { color: var(--text-muted); }
+.voice-bar-row { display: flex; align-items: center; gap: 8px; }
+.input-waveform { flex: 1; height: 28px; }
+.btn-voice-discard, .btn-voice-accept {
+  width: 32px; height: 32px; border-radius: 50%; border: none; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  font-size: 1rem;
+}
+.btn-voice-discard { background: var(--bg-tertiary); color: var(--text-secondary); }
+.btn-voice-discard:hover { background: var(--danger); color: #fff; }
+.btn-voice-accept { background: var(--accent); color: #fff; }
+.btn-voice-accept:hover { background: var(--accent-hover); }
