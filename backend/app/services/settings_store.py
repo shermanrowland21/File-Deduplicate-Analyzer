@@ -21,13 +21,13 @@ _lock = threading.Lock()
 # key -> (env var name, built-in default). These are the analysis functions whose
 # model is user-selectable. Cheap-by-default; all Bedrock.
 MODEL_KEYS: dict[str, tuple[str, str]] = {
-    "file_analysis":   ("FILE_ANALYSIS_MODEL",  "anthropic.claude-3-5-sonnet-20241022-v2:0"),
+    "file_analysis":   ("FILE_ANALYSIS_MODEL",  "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
     "file_namer_text": ("FILE_NAMER_TEXT_MODEL", "us.deepseek.v3-v1:0"),
-    "file_namer_vision": ("FILE_NAMER_VISION_MODEL", "anthropic.claude-3-5-haiku-20241022-v1:0"),
+    "file_namer_vision": ("FILE_NAMER_VISION_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
     "folder_namer":    ("FOLDER_NAMER_MODEL",   "us.deepseek.v3-v1:0"),
-    "dedup_advisor":   ("DEDUP_ADVISOR_MODEL",  "anthropic.claude-3-5-sonnet-20241022-v2:0"),
-    "media_topics":    ("MEDIA_TOPIC_MODEL",    "anthropic.claude-3-5-haiku-20241022-v1:0"),
-    "media_visual":    ("MEDIA_VISUAL_MODEL",   "anthropic.claude-3-5-sonnet-20241022-v2:0"),
+    "dedup_advisor":   ("DEDUP_ADVISOR_MODEL",  "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+    "media_topics":    ("MEDIA_TOPIC_MODEL",    "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+    "media_visual":    ("MEDIA_VISUAL_MODEL",   "us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
 }
 
 # Human-friendly labels for the Settings UI.

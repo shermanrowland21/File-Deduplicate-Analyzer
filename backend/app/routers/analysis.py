@@ -27,7 +27,7 @@ async def analyze_single_file(request: AnalysisRequest):
 
 
 @router.post("/analyze-batch")
-async def analyze_batch(file_paths: list[str], model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"):
+async def analyze_batch(file_paths: list[str], model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"):
     """Analyze multiple files and return metadata for each."""
     results = []
     errors = []

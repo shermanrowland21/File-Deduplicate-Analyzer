@@ -5,7 +5,7 @@ import { DirectoryBrowser } from './DirectoryBrowser'
 
 export function AnalysisPanel() {
   const [models, setModels] = useState<BedrockModel[]>([])
-  const [selectedModel, setSelectedModel] = useState('anthropic.claude-3-5-sonnet-20241022-v2:0')
+  const [selectedModel, setSelectedModel] = useState('us.anthropic.claude-sonnet-4-5-20250929-v1:0')
   const [filePath, setFilePath] = useState('')
   const [customPrompt, setCustomPrompt] = useState('')
   const [analyzing, setAnalyzing] = useState(false)
@@ -126,9 +126,8 @@ export function AnalysisPanel() {
               ))
             ) : (
               <>
-                <option value="anthropic.claude-3-5-sonnet-20241022-v2:0">Claude 3.5 Sonnet v2</option>
-                <option value="anthropic.claude-3-5-haiku-20241022-v1:0">Claude 3.5 Haiku</option>
-                <option value="anthropic.claude-sonnet-4-20250514-v1:0">Claude Sonnet 4</option>
+                <option value="us.anthropic.claude-sonnet-4-5-20250929-v1:0">Claude Sonnet 4.5</option>
+                <option value="us.anthropic.claude-haiku-4-5-20251001-v1:0">Claude Haiku 4.5</option>
                 <option value="amazon.nova-pro-v1:0">Amazon Nova Pro</option>
                 <option value="amazon.nova-lite-v1:0">Amazon Nova Lite</option>
               </>

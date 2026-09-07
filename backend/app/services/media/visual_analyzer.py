@@ -25,9 +25,9 @@ def get_bedrock_client():
 
 # Best models for visual analysis tasks
 VISUAL_MODELS = {
-    "ocr": "anthropic.claude-sonnet-4-20250514-v1:0",  # Best at reading text in images
+    "ocr": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",  # Best at reading text in images
     "scene": "amazon.nova-pro-v1:0",  # Good multimodal scene understanding
-    "detailed": "anthropic.claude-sonnet-4-20250514-v1:0",  # Most thorough analysis
+    "detailed": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",  # Most thorough analysis
     "fast": "amazon.nova-lite-v1:0",  # Quick classification, bulk processing
 }
 

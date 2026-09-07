@@ -23,7 +23,7 @@ class AnalyzeMediaRequest(BaseModel):
     frame_interval: int = 30
     max_frames: int = 60
     visual_model: Optional[str] = None
-    topic_model: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
+    topic_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -36,7 +36,7 @@ class BatchAnalyzeRequest(BaseModel):
     frame_interval: int = 30
     max_frames: int = 60
     visual_model: Optional[str] = None
-    topic_model: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
+    topic_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class SearchRequest(BaseModel):

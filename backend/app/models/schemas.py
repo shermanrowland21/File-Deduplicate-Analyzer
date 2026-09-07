@@ -82,7 +82,7 @@ class AnalysisRequest(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     file_path: str
-    model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     analysis_prompt: Optional[str] = None  # custom analysis instructions
 
 
@@ -115,7 +115,7 @@ class RenameRequest(BaseModel):
     file_path: str
     naming_convention: NamingConvention
     metadata: Optional[FileMetadata] = None
-    model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 class RenamePreview(BaseModel):
@@ -131,7 +131,7 @@ class BulkRenameRequest(BaseModel):
 
     file_paths: list[str]
     naming_convention: NamingConvention
-    model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 class BulkRenamePreview(BaseModel):

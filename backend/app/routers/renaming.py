@@ -128,7 +128,7 @@ class TypedBulkRenameRequest(BaseModel):
     file_paths: list[str]
     # per-type conventions keyed by group name (image/video/document/…) + "default"
     conventions: dict  # {group: {template, date_format, separator, case, max_length, replace_spaces_with}}
-    model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 @router.post("/preview-bulk-typed", response_model=BulkRenamePreview)

@@ -93,7 +93,7 @@ def _run_pipeline(job_id: str, file_path: str, options: dict):
     frame_interval = options.get("frame_interval", 30)
     max_frames = options.get("max_frames", 60)
     visual_model = options.get("visual_model")
-    topic_model = options.get("topic_model", "anthropic.claude-3-5-haiku-20241022-v1:0")
+    topic_model = options.get("topic_model", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
     # Still images take a dedicated branch: no audio/frames — just a direct
     # vision analysis (description + OCR + objects), stored the same way so

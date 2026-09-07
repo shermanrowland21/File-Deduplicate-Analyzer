@@ -23,9 +23,9 @@ from botocore.exceptions import ClientError
 
 
 # Default model for tagging (fast + good at structured output)
-TAG_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
+TAG_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 # Higher quality model for detailed analysis
-DETAIL_MODEL = "anthropic.claude-sonnet-4-20250514-v1:0"
+DETAIL_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 def _get_bedrock_client():

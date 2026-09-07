@@ -15,28 +15,20 @@ from botocore.exceptions import ClientError, NoCredentialsError
 # Supported models with their capabilities
 AVAILABLE_MODELS = [
     {
-        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
-        "model_name": "Claude 3.5 Sonnet v2",
+        "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "model_name": "Claude Sonnet 4.5",
         "provider": "Anthropic",
         "supports_images": True,
         "supports_video": False,
         "description": "Best balance of intelligence and speed. Supports text and image analysis.",
     },
     {
-        "model_id": "anthropic.claude-3-5-haiku-20241022-v1:0",
-        "model_name": "Claude 3.5 Haiku",
+        "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "model_name": "Claude Haiku 4.5",
         "provider": "Anthropic",
         "supports_images": True,
         "supports_video": False,
         "description": "Fastest model, good for bulk file analysis. Supports text and images.",
-    },
-    {
-        "model_id": "anthropic.claude-sonnet-4-20250514-v1:0",
-        "model_name": "Claude Sonnet 4",
-        "provider": "Anthropic",
-        "supports_images": True,
-        "supports_video": True,
-        "description": "Latest Claude model with advanced reasoning. Supports text, images, and video.",
     },
     {
         "model_id": "amazon.titan-text-express-v1",

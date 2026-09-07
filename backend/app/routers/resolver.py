@@ -100,7 +100,7 @@ async def execute(request: ExecuteRequest):
 
 class AdviseStartRequest(BaseModel):
     scan_id: Optional[str] = None
-    model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     max_groups: int = 200          # cap: prioritized by wasted space
     min_size: int = 0              # only advise on groups with files >= this
 
@@ -140,7 +140,7 @@ async def advise_stop(job_id: str):
 class AdviseOneRequest(BaseModel):
     scan_id: Optional[str] = None
     group_hash: str
-    model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 @router.post("/advise-group")
