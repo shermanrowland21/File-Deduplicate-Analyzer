@@ -1325,3 +1325,208 @@ def ledger_list(status: str, limit: int = 500) -> list[dict]:
         return led.list_by_status(status, limit)
     finally:
         led.close()
+
+
+# ============================================================ -pinned artifact cleanup
+# Google Takeout flattened Drive version metadata into filenames as
+# "<name>-at-<ISO-timestamp>-pinned.<ext>". These are almost always byte-identical
+# to a clean-named twin already in Organized. This cleanup:
+#   - QUARANTINES a -pinned file only if an identical-MD5 NON-pinned twin exists
+#     in Organized (so nothing is lost). Reversible.
+#   - RENAMES the rare -pinned file that is the sole copy of its content, stripping
+#     the "-at-<ts>-pinned" suffix back to the clean name. Reversible.
+# Read-only preview first; apply requires confirm.
+
+import re as _re
+
+_PINNED_MANIFEST_DIR = os.path.join(_DB_DIR, "pinned_manifests")
+_PINNED_QUARANTINE_PREFIX = "_PinnedQuarantine"
+
+# "-at-<ISO timestamp>-pinned" right before the extension, or a bare "-pinned".
+_AT_PINNED_RE = _re.compile(r"-at-\d{4}-\d\d-\d\dt[\d_.]+z-pinned$", _re.I)
+_BARE_PINNED_RE = _re.compile(r"-pinned$", _re.I)
+_IS_PINNED_RE = _re.compile(r"-pinned\.[^.]+$", _re.I)
+
+
+def _is_pinned_name(path: str) -> bool:
+    return bool(_IS_PINNED_RE.search(os.path.basename(path)))
+
+
+def _pinned_clean_name(path: str) -> str:
+    """The clean filename with the -at-<ts>-pinned (or bare -pinned) suffix removed."""
+    name = os.path.basename(path)
+    stem, ext = os.path.splitext(name)
+    stem = _AT_PINNED_RE.sub("", stem)
+    stem = _BARE_PINNED_RE.sub("", stem)
+    return (stem + ext) if stem else name
+
+
+def _scan_pinned() -> dict:
+    """Build md5->paths from the Organized index, then classify every -pinned file
+    as 'redundant' (has a non-pinned identical twin) or 'unique' (no twin)."""
+    idx = mi.open_index(_ORGANIZED_ROOT)
+    by_md5: dict = {}
+    try:
+        for path, md5 in idx._conn.execute("SELECT path, md5 FROM files WHERE md5<>''"):
+            by_md5.setdefault(md5, []).append(path)
+    finally:
+        idx.close()
+
+    redundant = []   # {path, keeper, md5}  -> quarantine (twin exists)
+    unique = []      # {path, clean_name, md5} -> rename (sole copy)
+    for md5, paths in by_md5.items():
+        pinned = [p for p in paths if _is_pinned_name(p)]
+        if not pinned:
+            continue
+        non_pinned = [p for p in paths if not _is_pinned_name(p)]
+        if non_pinned:
+            # keeper: cleanest/shortest non-pinned copy
+            keeper = sorted(non_pinned, key=lambda p: (len(p), len(os.path.basename(p))))[0]
+            for pp in pinned:
+                redundant.append({"path": pp, "keeper": keeper, "md5": md5})
+        else:
+            # no clean twin; if multiple pinned copies, keep one and the rest are
+            # redundant against it; the survivor gets renamed.
+            survivor = sorted(pinned, key=lambda p: (len(p), len(os.path.basename(p))))[0]
+            for pp in pinned:
+                if pp == survivor:
+                    unique.append({"path": pp, "clean_name": _pinned_clean_name(pp),
+                                   "md5": md5})
+                else:
+                    redundant.append({"path": pp, "keeper": survivor, "md5": md5})
+    return {"redundant": redundant, "unique": unique}
+
+
+def pinned_preview(examples: int = 12) -> dict:
+    """DRY RUN — how many -pinned artifacts are redundant (quarantine) vs unique
+    (rename), with examples. No changes."""
+    data = _scan_pinned()
+    return {
+        "redundant_count": len(data["redundant"]),
+        "unique_count": len(data["unique"]),
+        "redundant_examples": [
+            {"drop": r["path"], "keeper": r["keeper"]}
+            for r in data["redundant"][:examples]
+        ],
+        "unique_examples": [
+            {"path": u["path"], "rename_to": u["clean_name"]}
+            for u in data["unique"][:examples]
+        ],
+    }
+
+
+def pinned_quarantine(confirm: bool = False) -> dict:
+    """Quarantine every -pinned artifact that has a byte-identical NON-pinned twin.
+    Safety at APPLY time: re-verify (a) keeper still exists and (b) the pinned
+    file's current MD5 still matches before moving. Reversible via manifest."""
+    if not confirm:
+        return {"error": "confirm=true required"}
+    data = _scan_pinned()
+    os.makedirs(_PINNED_MANIFEST_DIR, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    q_root = os.path.join(_ORGANIZED_ROOT, f"{_PINNED_QUARANTINE_PREFIX}_{stamp}")
+    mpath = os.path.join(_PINNED_MANIFEST_DIR, f"pinned_quarantine_{int(time.time()*1000)}.json")
+    manifest = {"action": "pinned_quarantine", "at": time.time(),
+                "quarantine_root": q_root, "entries": []}
+
+    def flush():
+        try:
+            tmp = mpath + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(manifest, f, ensure_ascii=False)
+            os.replace(tmp, mpath)
+        except OSError:
+            pass
+
+    quarantined = 0
+    skipped = 0
+    errors = []
+    since = 0
+    flush()
+    for r in data["redundant"]:
+        src, keeper = r["path"], r["keeper"]
+        # safety: keeper must exist so we never remove the last copy
+        if not os.path.isfile(keeper):
+            skipped += 1
+            continue
+        if not os.path.isfile(src):
+            skipped += 1
+            continue
+        # safety: re-verify content still matches the recorded md5
+        cur_md5 = _md5_of_file(src)
+        if cur_md5 != r["md5"]:
+            skipped += 1
+            continue
+        try:
+            rel = os.path.relpath(os.path.abspath(src), os.path.abspath(_ORGANIZED_ROOT))
+            dest = _collision_safe_path(os.path.join(q_root, rel))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.rename(src, dest)
+            manifest["entries"].append({"from": os.path.abspath(src), "to": dest})
+            quarantined += 1
+            since += 1
+            if since >= 50:
+                flush(); since = 0
+        except OSError as e:
+            errors.append(f"{src}: {e}")
+    flush()
+    return {"quarantined": quarantined, "skipped": skipped, "errors": errors,
+            "manifest_file": mpath}
+
+
+def pinned_rename(confirm: bool = False) -> dict:
+    """Rename the unique (no-twin) -pinned files, stripping the -at-<ts>-pinned
+    suffix back to the clean name. In-place, collision-safe, reversible."""
+    if not confirm:
+        return {"error": "confirm=true required"}
+    data = _scan_pinned()
+    os.makedirs(_PINNED_MANIFEST_DIR, exist_ok=True)
+    mpath = os.path.join(_PINNED_MANIFEST_DIR, f"pinned_rename_{int(time.time()*1000)}.json")
+    manifest = {"action": "pinned_rename", "at": time.time(), "entries": []}
+    renamed = 0
+    skipped = 0
+    errors = []
+    for u in data["unique"]:
+        src = u["path"]
+        if not os.path.isfile(src):
+            skipped += 1
+            continue
+        clean = u["clean_name"]
+        if not clean or clean == os.path.basename(src):
+            skipped += 1
+            continue
+        dst = _collision_safe(os.path.join(os.path.dirname(src), clean))
+        try:
+            os.rename(src, dst)
+            manifest["entries"].append({"from": src, "to": dst})
+            renamed += 1
+        except OSError as e:
+            errors.append(f"{src}: {e}")
+    with open(mpath, "w", encoding="utf-8") as f:
+        _json.dump(manifest, f, ensure_ascii=False, indent=2)
+    return {"renamed": renamed, "skipped": skipped, "errors": errors,
+            "manifest_file": mpath}
+
+
+def pinned_undo(manifest_file: str, confirm: bool = False) -> dict:
+    """Reverse a pinned_quarantine or pinned_rename batch from its manifest."""
+    if not confirm:
+        return {"error": "confirm=true required"}
+    if not os.path.exists(manifest_file):
+        return {"error": f"manifest not found: {manifest_file}"}
+    with open(manifest_file, "r", encoding="utf-8") as f:
+        man = _json.load(f)
+    restored = 0
+    errors = []
+    for e in man.get("entries", []):
+        cur, orig = e["to"], e["from"]
+        try:
+            if not os.path.isfile(cur):
+                errors.append(f"missing: {cur}"); continue
+            if os.path.exists(orig):
+                errors.append(f"orig exists: {orig}"); continue
+            os.makedirs(os.path.dirname(orig), exist_ok=True)
+            os.rename(cur, orig); restored += 1
+        except OSError as ex:
+            errors.append(f"{cur}: {ex}")
+    return {"restored": restored, "errors": errors}

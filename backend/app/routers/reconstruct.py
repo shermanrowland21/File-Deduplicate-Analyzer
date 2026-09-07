@@ -290,3 +290,55 @@ async def rename_undo(request: RenameUndoRequest):
 @router.get("/ledger/list")
 async def ledger_list(status: str, limit: int = 500):
     return {"status": status, "items": rc.ledger_list(status, limit)}
+
+
+# ---------------------------------------------------------------- -pinned cleanup
+
+@router.get("/pinned/preview")
+async def pinned_preview(examples: int = 12):
+    """DRY RUN — count -pinned Takeout artifacts: how many are redundant (have a
+    clean identical twin → quarantine) vs unique (→ rename). No changes."""
+    return rc.pinned_preview(examples=examples)
+
+
+class PinnedApplyRequest(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/pinned/quarantine")
+async def pinned_quarantine(request: PinnedApplyRequest):
+    """Quarantine every -pinned artifact that has a byte-identical clean twin.
+    MD5-verified at apply time. Reversible."""
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    res = rc.pinned_quarantine(confirm=True)
+    if res.get("error"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.post("/pinned/rename")
+async def pinned_rename(request: PinnedApplyRequest):
+    """Rename the unique (no-twin) -pinned files, stripping the -at-<ts>-pinned
+    suffix back to the clean name. Reversible."""
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    res = rc.pinned_rename(confirm=True)
+    if res.get("error"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+class PinnedUndoRequest(BaseModel):
+    manifest_file: str
+    confirm: bool = False
+
+
+@router.post("/pinned/undo")
+async def pinned_undo(request: PinnedUndoRequest):
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    res = rc.pinned_undo(request.manifest_file, confirm=True)
+    if res.get("error"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res

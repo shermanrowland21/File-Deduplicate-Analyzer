@@ -496,4 +496,37 @@ export const api = {
     });
     return handleResponse<any>(response);
   },
+
+  // -pinned Takeout artifact cleanup (within Organized)
+  async pinnedPreview(examples = 12) {
+    const response = await fetch(`${API_BASE}/reconstruct/pinned/preview?examples=${examples}`);
+    return handleResponse<any>(response);
+  },
+
+  async pinnedQuarantine() {
+    const response = await fetch(`${API_BASE}/reconstruct/pinned/quarantine`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async pinnedRename() {
+    const response = await fetch(`${API_BASE}/reconstruct/pinned/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async pinnedUndo(manifestFile: string) {
+    const response = await fetch(`${API_BASE}/reconstruct/pinned/undo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manifest_file: manifestFile, confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
 };
