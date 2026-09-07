@@ -20,6 +20,9 @@ export function PinnedCleanupPanel() {
   const [notice, setNotice] = useState('')
   const [qManifest, setQManifest] = useState<string | null>(null)
   const [rManifest, setRManifest] = useState<string | null>(null)
+  const [job, setJob] = useState<any>(null)
+  const [jobId, setJobId] = useState<string | null>(null)
+  const qPoll = useState<{ id: number | null }>({ id: null })[0]
 
   const load = async () => {
     setLoading(true); setError('')
@@ -36,18 +39,40 @@ export function PinnedCleanupPanel() {
   const runQuarantine = async () => {
     if (!window.confirm(
       `Quarantine ${num(preview?.redundant_count)} -pinned files that each have an identical clean twin in Organized?\n\n` +
-      `Files are MOVED to a reversible _PinnedQuarantine folder, never deleted. You can Undo.`)) return
+      `Files are MOVED to a reversible _PinnedQuarantine folder, never deleted. You can Cancel or Undo.`)) return
     setBusy(true); setError(''); setNotice('')
     try {
-      const r = await api.pinnedQuarantine()
-      setQManifest(r.manifest_file || null)
-      setNotice(`Quarantined ${num(r.quarantined)} redundant -pinned files. ${r.skipped ? num(r.skipped) + ' skipped (safety). ' : ''}${r.errors?.length ? r.errors.length + ' errors.' : ''}`)
-      await load()
+      const r = await api.pinnedQuarantine()   // { job_id }
+      setJobId(r.job_id)
+      if (qPoll.id) clearInterval(qPoll.id)
+      qPoll.id = window.setInterval(async () => {
+        try {
+          const j = await api.pinnedQuarantineStatus(r.job_id)
+          setJob(j)
+          if (j.status === 'completed' || j.status === 'error' || j.status === 'cancelled') {
+            if (qPoll.id) { clearInterval(qPoll.id); qPoll.id = null }
+            setBusy(false)
+            setJobId(null)
+            if (j.status !== 'error') {
+              setQManifest(j.manifest_file || null)
+              const verb = j.status === 'cancelled' ? 'Cancelled —' : 'Quarantined'
+              setNotice(`${verb} ${num(j.quarantined)} redundant -pinned files.${j.skipped ? ' ' + num(j.skipped) + ' skipped (safety).' : ''}${j.errors ? ' ' + j.errors + ' errors.' : ''}`)
+              await load()
+            } else {
+              setError(j.error || 'Quarantine failed')
+            }
+          }
+        } catch { /* keep polling */ }
+      }, 1200)
     } catch (e: any) {
       setError(e.message || 'Quarantine failed')
-    } finally {
       setBusy(false)
     }
+  }
+
+  const cancelQuarantine = async () => {
+    if (!jobId) return
+    try { await api.pinnedQuarantineCancel(jobId) } catch { /* ignore */ }
   }
 
   const runRename = async () => {
@@ -116,8 +141,9 @@ export function PinnedCleanupPanel() {
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button className="btn btn-danger" onClick={runQuarantine} disabled={busy || !preview.redundant_count}>
-                {busy ? <><span className="spinner" /> Working…</> : `Quarantine ${num(preview.redundant_count)} redundant`}
+                {busy && jobId ? <><span className="spinner" /> Quarantining… ({num(job?.quarantined || 0)})</> : busy ? <><span className="spinner" /> Working…</> : `Quarantine ${num(preview.redundant_count)} redundant`}
               </button>
+              {jobId && <button className="btn btn-secondary" onClick={cancelQuarantine}>Cancel</button>}
               <button className="btn btn-secondary" onClick={runRename} disabled={busy || !preview.unique_count}>
                 Rename {num(preview.unique_count)} unique
               </button>

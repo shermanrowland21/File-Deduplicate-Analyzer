@@ -1415,63 +1415,101 @@ def pinned_preview(examples: int = 12) -> dict:
     }
 
 
-def pinned_quarantine(confirm: bool = False) -> dict:
-    """Quarantine every -pinned artifact that has a byte-identical NON-pinned twin.
-    Safety at APPLY time: re-verify (a) keeper still exists and (b) the pinned
-    file's current MD5 still matches before moving. Reversible via manifest."""
+_pinned_jobs: dict = {}
+
+
+def pinned_quarantine(confirm: bool = False) -> str:
+    """Start a BACKGROUND job that quarantines every -pinned artifact with a
+    byte-identical NON-pinned twin. Returns a job_id. Cancellable + resumable-safe;
+    reversible via manifest. (Was synchronous before — now backgrounded so it can
+    be cancelled cleanly.)"""
     if not confirm:
-        return {"error": "confirm=true required"}
-    data = _scan_pinned()
-    os.makedirs(_PINNED_MANIFEST_DIR, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    q_root = os.path.join(_ORGANIZED_ROOT, f"{_PINNED_QUARANTINE_PREFIX}_{stamp}")
-    mpath = os.path.join(_PINNED_MANIFEST_DIR, f"pinned_quarantine_{int(time.time()*1000)}.json")
-    manifest = {"action": "pinned_quarantine", "at": time.time(),
-                "quarantine_root": q_root, "entries": []}
+        raise ValueError("confirm=true required")
+    job_id = f"pinnedq_{int(time.time())}"
+    _pinned_jobs[job_id] = {"status": "running", "phase": "scanning",
+                            "quarantined": 0, "skipped": 0, "errors": 0,
+                            "manifest_file": None, "cancel": False,
+                            "started_at": time.time()}
+    import threading
+    threading.Thread(target=_pinned_quarantine_worker, args=(job_id,),
+                     daemon=True).start()
+    return job_id
 
-    def flush():
-        try:
-            tmp = mpath + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                _json.dump(manifest, f, ensure_ascii=False)
-            os.replace(tmp, mpath)
-        except OSError:
-            pass
 
-    quarantined = 0
-    skipped = 0
-    errors = []
-    since = 0
-    flush()
-    for r in data["redundant"]:
-        src, keeper = r["path"], r["keeper"]
-        # safety: keeper must exist so we never remove the last copy
-        if not os.path.isfile(keeper):
-            skipped += 1
-            continue
-        if not os.path.isfile(src):
-            skipped += 1
-            continue
-        # safety: re-verify content still matches the recorded md5
-        cur_md5 = _md5_of_file(src)
-        if cur_md5 != r["md5"]:
-            skipped += 1
-            continue
-        try:
-            rel = os.path.relpath(os.path.abspath(src), os.path.abspath(_ORGANIZED_ROOT))
-            dest = _collision_safe_path(os.path.join(q_root, rel))
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            os.rename(src, dest)
-            manifest["entries"].append({"from": os.path.abspath(src), "to": dest})
-            quarantined += 1
-            since += 1
-            if since >= 50:
-                flush(); since = 0
-        except OSError as e:
-            errors.append(f"{src}: {e}")
-    flush()
-    return {"quarantined": quarantined, "skipped": skipped, "errors": errors,
-            "manifest_file": mpath}
+def get_pinned_job(job_id: str):
+    return _pinned_jobs.get(job_id)
+
+
+def cancel_pinned_job(job_id: str) -> bool:
+    job = _pinned_jobs.get(job_id)
+    if not job:
+        return False
+    job["cancel"] = True
+    return True
+
+
+def _pinned_quarantine_worker(job_id: str):
+    job = _pinned_jobs[job_id]
+    try:
+        data = _scan_pinned()
+        job["phase"] = "quarantining"
+        job["total"] = len(data["redundant"])
+        os.makedirs(_PINNED_MANIFEST_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        q_root = os.path.join(_ORGANIZED_ROOT, f"{_PINNED_QUARANTINE_PREFIX}_{stamp}")
+        mpath = os.path.join(_PINNED_MANIFEST_DIR,
+                             f"pinned_quarantine_{int(time.time()*1000)}.json")
+        manifest = {"action": "pinned_quarantine", "at": time.time(),
+                    "quarantine_root": q_root, "entries": []}
+        job["manifest_file"] = mpath
+
+        def flush():
+            try:
+                tmp = mpath + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    _json.dump(manifest, f, ensure_ascii=False)
+                os.replace(tmp, mpath)
+            except OSError:
+                pass
+
+        since = 0
+        cancelled = False
+        flush()
+        for r in data["redundant"]:
+            if job.get("cancel"):
+                cancelled = True
+                break
+            src, keeper = r["path"], r["keeper"]
+            # safety: keeper must exist so we never remove the last copy
+            if not os.path.isfile(keeper):
+                job["skipped"] += 1
+                continue
+            if not os.path.isfile(src):
+                job["skipped"] += 1
+                continue
+            # safety: re-verify content still matches the recorded md5
+            cur_md5 = _md5_of_file(src)
+            if cur_md5 != r["md5"]:
+                job["skipped"] += 1
+                continue
+            try:
+                rel = os.path.relpath(os.path.abspath(src), os.path.abspath(_ORGANIZED_ROOT))
+                dest = _collision_safe_path(os.path.join(q_root, rel))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                os.rename(src, dest)
+                manifest["entries"].append({"from": os.path.abspath(src), "to": dest})
+                job["quarantined"] += 1
+                since += 1
+                if since >= 50:
+                    flush(); since = 0
+            except OSError as e:
+                job["errors"] += 1
+        flush()
+        job["status"] = "cancelled" if cancelled else "completed"
+        job["phase"] = "cancelled" if cancelled else "complete"
+        job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
+    except Exception as e:
+        job["status"] = "error"; job["error"] = str(e)
 
 
 def pinned_rename(confirm: bool = False) -> dict:

@@ -41,6 +41,62 @@ _jobs: dict = {}
 _PAREN_RE = re.compile(r" \(\d+\)(\.[^.]+)?$")
 _TS_RE = re.compile(r"-at-\d[\d\-t:_.z]*", re.I)
 
+# ---- session keeper rule (guidance-driven) --------------------------------
+# The keeper is chosen by, in order:
+#   1. prefer_folder  (organized | snapshot | none)      [base]
+#   2. prefer_paths   (ordered path substrings; earlier = higher priority)
+#   3. avoid_paths    (path substrings that should LOSE if possible, e.g.
+#                      transferred-employee "'s files" folders)
+#   4. tiebreakers    (ordered list from: cleanest_name, shortest_path,
+#                      longest_path, newest, oldest, longest_name)
+# When two copies tie on ALL of the above, the group is AMBIGUOUS -> eligible
+# for AI per-file resolution. Persisted per machine so it survives restarts.
+_RULE_PATH = os.path.join(_STORE, "keeper_rule.json")
+
+_DEFAULT_RULE = {
+    "prefer_folder": "organized",
+    "prefer_paths": [],
+    "avoid_paths": [],
+    "tiebreakers": ["cleanest_name", "shortest_path", "longest_name"],
+}
+
+# per-md5 AI overrides: md5 -> chosen keeper path (set by resolve-ambiguous)
+_ai_overrides: dict = {}
+
+
+def get_rule() -> dict:
+    try:
+        with open(_RULE_PATH, "r", encoding="utf-8") as f:
+            r = dict(_DEFAULT_RULE)
+            r.update(json.load(f))
+            return r
+    except (OSError, json.JSONDecodeError):
+        return dict(_DEFAULT_RULE)
+
+
+def set_rule(patch: dict) -> dict:
+    r = get_rule()
+    for k in ("prefer_folder", "prefer_paths", "avoid_paths", "tiebreakers"):
+        if k in patch and patch[k] is not None:
+            r[k] = patch[k]
+    os.makedirs(_STORE, exist_ok=True)
+    tmp = _RULE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(r, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, _RULE_PATH)
+    clear_cache()      # keepers change -> rebuild groups
+    return r
+
+
+def set_ai_override(md5: str, keeper_path: str):
+    _ai_overrides[md5] = keeper_path
+    clear_cache()
+
+
+def clear_ai_overrides():
+    _ai_overrides.clear()
+    clear_cache()
+
 
 def _norm(p: str) -> str:
     return p.replace("\\", "/")
@@ -62,25 +118,77 @@ def _load_index(db_path: str, tag: str, into: dict):
         return
     c = sqlite3.connect(db_path)
     try:
-        for path, md5, size in c.execute("SELECT path, md5, size FROM files WHERE md5<>''"):
+        for path, md5, size, mtime in c.execute(
+                "SELECT path, md5, size, mtime FROM files WHERE md5<>''"):
             into.setdefault(md5, []).append(
-                {"path": path, "size": size or 0, "folder": tag})
+                {"path": path, "size": size or 0, "mtime": mtime or 0,
+                 "folder": tag})
     finally:
         c.close()
 
 
-def _pick_keeper(copies: list, prefer_folder: str) -> dict:
-    """Choose the single keeper for a group per the rule."""
-    pool = copies
-    if prefer_folder in ("organized", "snapshot"):
-        preferred = [c for c in copies if c["folder"] == prefer_folder]
-        if preferred:
-            pool = preferred
-    # tiebreak: shortest path, then cleanest name, then longest name
-    def key(c):
-        name = os.path.basename(c["path"])
-        return (len(_norm(c["path"])), _clean_score(name), -len(name))
-    return sorted(pool, key=key)[0]
+def _prefer_rank(path: str, prefer_paths: list) -> int:
+    """Index of the first prefer_paths substring that matches (lower = higher
+    priority). Returns a large number if none match."""
+    low = _norm(path).lower()
+    for i, sub in enumerate(prefer_paths):
+        if sub and sub.lower() in low:
+            return i
+    return len(prefer_paths) + 1
+
+
+def _avoid_hit(path: str, avoid_paths: list) -> int:
+    low = _norm(path).lower()
+    return 1 if any(sub and sub.lower() in low for sub in avoid_paths) else 0
+
+
+def _tiebreak_value(c: dict, tb: str):
+    """Sort value for one tiebreaker (lower sorts first = preferred keeper)."""
+    name = os.path.basename(c["path"])
+    if tb == "cleanest_name":
+        return _clean_score(name)
+    if tb == "shortest_path":
+        return len(_norm(c["path"]))
+    if tb == "longest_path":
+        return -len(_norm(c["path"]))
+    if tb == "longest_name":
+        return -len(name)
+    if tb == "shortest_name":
+        return len(name)
+    if tb == "newest":
+        return -(c.get("mtime") or 0)
+    if tb == "oldest":
+        return (c.get("mtime") or 0)
+    return 0
+
+
+def _keeper_sort_key(c: dict, rule: dict):
+    """Full ordered sort key: prefer_folder, prefer_paths rank, avoid penalty,
+    then each configured tiebreaker in order."""
+    pf = rule.get("prefer_folder", "none")
+    folder_rank = 0 if (pf in ("organized", "snapshot") and c["folder"] == pf) else 1
+    key = [folder_rank,
+           _prefer_rank(c["path"], rule.get("prefer_paths", [])),
+           _avoid_hit(c["path"], rule.get("avoid_paths", []))]
+    for tb in rule.get("tiebreakers", []):
+        key.append(_tiebreak_value(c, tb))
+    return tuple(key)
+
+
+def _pick_keeper(copies: list, prefer_folder: str, rule: dict = None):
+    """Choose the single keeper for a group using the session keeper rule.
+    Returns (keeper_dict, ambiguous_bool). ambiguous=True when >1 copy shares the
+    exact same top sort key AND no AI override resolved it — those go to AI."""
+    if rule is None:
+        rule = dict(get_rule())
+        rule["prefer_folder"] = prefer_folder  # caller's prefer_folder wins as base
+
+    ranked = sorted(copies, key=lambda c: _keeper_sort_key(c, rule))
+    top = ranked[0]
+    top_key = _keeper_sort_key(top, rule)
+    tied = [c for c in ranked if _keeper_sort_key(c, rule) == top_key]
+    ambiguous = len(tied) > 1
+    return top, ambiguous
 
 
 def _build_groups(prefer_folder: str, cross_only: bool = False,
@@ -101,9 +209,25 @@ def _build_groups(prefer_folder: str, cross_only: bool = False,
     _load_index(mi.open_index(ORGANIZED_ROOT).db_path, "organized", by_md5)
     _load_index(mi.open_index(SNAPSHOT_ROOT).db_path, "snapshot", by_md5)
 
+    # Load the session keeper rule once; caller's prefer_folder is the base.
+    rule = dict(get_rule())
+    rule["prefer_folder"] = prefer_folder
+
+    def choose_keeper(md5: str, pool: list):
+        """Apply AI override if present, else the rule. Returns (keeper, ambiguous,
+        ai_resolved)."""
+        ov = _ai_overrides.get(md5)
+        if ov:
+            match = next((c for c in pool if c["path"] == ov), None)
+            if match:
+                return match, False, True
+        k, amb = _pick_keeper(pool, prefer_folder, rule)
+        return k, amb, False
+
     groups = []
     redundant_files = 0
     reclaimable = 0
+    ambiguous_groups = 0
     cross_groups = cross_files = cross_bytes = 0
     within_groups = within_files = 0
     for md5, copies in by_md5.items():
@@ -118,16 +242,19 @@ def _build_groups(prefer_folder: str, cross_only: bool = False,
             snapshot_copies = [c for c in copies if c["folder"] == "snapshot"]
             if not organized_copies or not snapshot_copies:
                 continue   # no Organized keeper, or nothing in Snapshot -> skip
-            # keeper is the cleanest Organized copy; Organized is NEVER removed
-            keeper = _pick_keeper(organized_copies, "organized")
+            # keeper is chosen among ORGANIZED copies only; Organized is NEVER removed
+            keeper, amb, ai = choose_keeper(md5, organized_copies)
             redundant = snapshot_copies   # remove ALL snapshot copies (Organized survives)
             gb = sum(c["size"] for c in redundant)
             groups.append({
                 "md5": md5, "keeper": keeper, "redundant": redundant,
                 "cross_folder": True, "reclaim": gb,
+                "ambiguous": amb, "ai_resolved": ai,
             })
             redundant_files += len(redundant)
             reclaimable += gb
+            if amb:
+                ambiguous_groups += 1
             cross_groups += 1
             cross_files += len(redundant)
             cross_bytes += gb
@@ -135,18 +262,20 @@ def _build_groups(prefer_folder: str, cross_only: bool = False,
 
         if cross_only and not is_cross:
             continue   # skip within-folder-only groups entirely
-        keeper = _pick_keeper(copies, prefer_folder)
+        keeper, amb, ai = choose_keeper(md5, copies)
         redundant = [c for c in copies if c["path"] != keeper["path"]]
         if not redundant:
             continue
         gb = sum(c["size"] for c in redundant)
         groups.append({
             "md5": md5, "keeper": keeper, "redundant": redundant,
-            "cross_folder": is_cross,
-            "reclaim": gb,
+            "cross_folder": is_cross, "reclaim": gb,
+            "ambiguous": amb, "ai_resolved": ai,
         })
         redundant_files += len(redundant)
         reclaimable += gb
+        if amb:
+            ambiguous_groups += 1
         if is_cross:
             cross_groups += 1
             cross_files += len(redundant)
@@ -168,6 +297,8 @@ def _build_groups(prefer_folder: str, cross_only: bool = False,
             "prefer_folder": prefer_folder,
             "cross_only": cross_only,
             "snapshot_only": snapshot_only,
+            "ambiguous_groups": ambiguous_groups,
+            "rule": rule,
         },
     }
 
@@ -230,6 +361,8 @@ def groups_page(prefer_folder: str = "organized", cross_only: bool = True,
             "keeper": g["keeper"]["path"],
             "keeper_folder": g["keeper"]["folder"],
             "cross_folder": g["cross_folder"],
+            "ambiguous": g.get("ambiguous", False),
+            "ai_resolved": g.get("ai_resolved", False),
             "reclaim_mb": round(g["reclaim"] / 1024 / 1024, 1),
             "removes": [{"path": r["path"], "folder": r["folder"],
                          "size_mb": round(r["size"] / 1024 / 1024, 1)}
@@ -243,6 +376,99 @@ def groups_page(prefer_folder: str = "organized", cross_only: bool = True,
         "filtered": bool(folder_filter),
         "groups": out,
     }
+
+
+# ------------------------------------------------ AI resolution of ambiguities
+# For groups the deterministic rule can't decide (a true tie), ask Bedrock to
+# pick the keeper from the candidate paths, guided by the user's stated intent.
+# Batched (many groups per call), advisory, records overrides via set_ai_override.
+
+def ambiguous_groups(prefer_folder: str = "organized", cross_only: bool = False,
+                     snapshot_only: bool = False, limit: int = 200) -> list:
+    """Return up to `limit` groups the rule marked ambiguous, with their candidate
+    keeper paths (the pool the rule tied on)."""
+    data = _get_cached_groups(prefer_folder, cross_only, snapshot_only)
+    out = []
+    for g in data["groups"]:
+        if not g.get("ambiguous") or g.get("ai_resolved"):
+            continue
+        # candidates = keeper + any redundant in the SAME pool it chose from.
+        # For snapshot_only the pool is organized copies; otherwise all copies.
+        cands = [g["keeper"]["path"]] + [r["path"] for r in g["redundant"]]
+        out.append({"md5": g["md5"], "candidates": cands})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def resolve_ambiguous(guidance: str = "", prefer_folder: str = "organized",
+                      cross_only: bool = False, snapshot_only: bool = False,
+                      max_groups: int = 200, batch: int = 20) -> dict:
+    """Send ambiguous groups to Bedrock in batches; it picks the keeper per group
+    given the user's guidance. Records AI overrides. Returns counts + examples."""
+    from . import settings_store
+    from .bedrock_client import get_bedrock_client
+
+    amb = ambiguous_groups(prefer_folder, cross_only, snapshot_only, limit=max_groups)
+    if not amb:
+        return {"ambiguous": 0, "resolved": 0, "examples": []}
+
+    model_id = settings_store.get_model("dedup_advisor")
+    client = get_bedrock_client()
+    resolved = 0
+    examples = []
+
+    sys_prompt = (
+        "You choose which ONE duplicate copy to KEEP. Given the user's guidance and "
+        "a list of candidate file paths (identical content, different locations), "
+        "return the index of the path to keep and a short reason. Consider folder "
+        "meaning: prefer authoritative/final/organized locations; avoid backup, "
+        "'stuff to sort', and terminated-employee \"'s files\" folders unless the "
+        "guidance says otherwise. Respond ONLY as JSON: a list of "
+        '{"i": <group index>, "keep": <candidate index>, "reason": "<short>"}.')
+
+    for start in range(0, len(amb), batch):
+        chunk = amb[start:start + batch]
+        lines = []
+        for gi, g in enumerate(chunk):
+            cand_lines = "\n".join(f"    [{ci}] {p}" for ci, p in enumerate(g["candidates"]))
+            lines.append(f"  group {gi}:\n{cand_lines}")
+        user_msg = (f"Guidance: {guidance or '(none — use folder meaning)'}\n\n"
+                    f"Groups:\n" + "\n".join(lines))
+        try:
+            resp = client.converse(
+                modelId=model_id,
+                messages=[{"role": "user", "content": [{"text": user_msg}]}],
+                system=[{"text": sys_prompt}],
+                inferenceConfig={"maxTokens": 2048, "temperature": 0.1})
+            txt = ""
+            for b in resp["output"]["message"]["content"]:
+                if "text" in b:
+                    txt += b["text"]
+            txt = txt.strip()
+            if txt.startswith("```"):
+                txt = txt.split("```", 2)[1]
+                if txt.startswith("json"):
+                    txt = txt[4:]
+                txt = txt.strip("`").strip()
+            picks = json.loads(txt)
+        except Exception:
+            continue
+        for pick in picks:
+            try:
+                gi = int(pick["i"]); ci = int(pick["keep"])
+                g = chunk[gi]
+                keeper_path = g["candidates"][ci]
+                _ai_overrides[g["md5"]] = keeper_path
+                resolved += 1
+                if len(examples) < 10:
+                    examples.append({"keeper": keeper_path,
+                                     "reason": pick.get("reason", "")})
+            except (KeyError, IndexError, ValueError, TypeError):
+                continue
+
+    clear_cache()   # overrides change keepers
+    return {"ambiguous": len(amb), "resolved": resolved, "examples": examples}
 
 
 # ----------------------------------------------------------------- apply
@@ -273,7 +499,7 @@ def purge(prefer_folder: str = "organized", confirm: bool = False,
                      "prefer_folder": prefer_folder, "cross_only": cross_only,
                      "snapshot_only": snapshot_only, "quarantined": 0,
                      "reclaimed_bytes": 0, "errors": 0, "started_at": time.time(),
-                     "manifest_file": None}
+                     "manifest_file": None, "cancel": False}
     threading.Thread(target=_purge_worker,
                      args=(job_id, prefer_folder, cross_only, snapshot_only),
                      daemon=True).start()
@@ -282,6 +508,16 @@ def purge(prefer_folder: str = "organized", confirm: bool = False,
 
 def get_job(job_id: str):
     return _jobs.get(job_id)
+
+
+def cancel_job(job_id: str) -> bool:
+    """Signal a running purge to stop after the current file. It halts cleanly;
+    everything already moved stays recorded in the manifest and is undoable."""
+    job = _jobs.get(job_id)
+    if not job:
+        return False
+    job["cancel"] = True
+    return True
 
 
 def _purge_worker(job_id: str, prefer_folder: str, cross_only: bool = False,
@@ -314,12 +550,19 @@ def _purge_worker(job_id: str, prefer_folder: str, cross_only: bool = False,
         flush()
 
         since = 0
+        cancelled = False
         for g in data["groups"]:
+            if job.get("cancel"):
+                cancelled = True
+                break
             keeper_path = g["keeper"]["path"]
             # safety: only remove redundant if the keeper still exists on disk
             if not os.path.isfile(keeper_path):
                 continue
             for r in g["redundant"]:
+                if job.get("cancel"):
+                    cancelled = True
+                    break
                 src = r["path"]
                 if not os.path.isfile(src):
                     continue
@@ -338,9 +581,14 @@ def _purge_worker(job_id: str, prefer_folder: str, cross_only: bool = False,
                         flush(); since = 0
                 except OSError:
                     job["errors"] += 1
+            if cancelled:
+                break
         flush()
         clear_cache()   # files moved — stale group cache no longer valid
-        job["status"] = "completed"; job["phase"] = "complete"
+        if cancelled:
+            job["status"] = "cancelled"; job["phase"] = "cancelled"
+        else:
+            job["status"] = "completed"; job["phase"] = "complete"
         job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
     except Exception as e:
         job["status"] = "error"; job["error"] = str(e)

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api'
+import { KeeperGuidanceChat } from './KeeperGuidanceChat'
 
 /**
  * Cross-Folder Dedup review UI.
@@ -31,6 +32,7 @@ export function CrossDedupPanel() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [job, setJob] = useState<any>(null)
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [manifest, setManifest] = useState<string | null>(null)
   const pollRef = useState<{ id: number | null }>({ id: null })[0]
 
@@ -71,17 +73,24 @@ export function CrossDedupPanel() {
     }
   }
 
+  const cancelPurge = async () => {
+    if (!job?.job_id && !currentJobId) return
+    try { await api.crossdedupCancel(currentJobId || job.job_id) } catch { /* ignore */ }
+  }
+
   const pollJob = (jobId: string) => {
+    setCurrentJobId(jobId)
     if (pollRef.id) clearInterval(pollRef.id)
     pollRef.id = window.setInterval(async () => {
       try {
         const j = await api.crossdedupStatus(jobId)
         setJob(j)
-        if (j.status === 'completed' || j.status === 'error') {
+        if (j.status === 'completed' || j.status === 'error' || j.status === 'cancelled') {
           if (pollRef.id) { clearInterval(pollRef.id); pollRef.id = null }
-          if (j.status === 'completed') {
+          if (j.status === 'completed' || j.status === 'cancelled') {
             setManifest(j.manifest_file || null)
-            setNotice(`Quarantined ${num(j.quarantined)} files (${fmtGB(j.reclaimed_bytes)}). ${j.errors || 0} errors.`)
+            const verb = j.status === 'cancelled' ? 'Cancelled —' : 'Quarantined'
+            setNotice(`${verb} ${num(j.quarantined)} files (${fmtGB(j.reclaimed_bytes)}). ${j.errors || 0} errors.`)
             load(0, filter)
           }
         }
@@ -145,8 +154,19 @@ export function CrossDedupPanel() {
           <button className="btn btn-danger" onClick={runPurge} disabled={running || !summary || !queuedFiles}>
             {running ? <><span className="spinner" /> Quarantining… ({num(job.quarantined)})</> : `Quarantine ${num(queuedFiles)} files`}
           </button>
+          {running && (
+            <button className="btn btn-secondary" onClick={cancelPurge}>Cancel</button>
+          )}
         </div>
       </div>
+
+      {summary && (
+        <KeeperGuidanceChat
+          onRuleApplied={() => load(0, filter)}
+          ambiguousCount={summary.ambiguous_groups || 0}
+          resolveOpts={{ preferFolder, snapshotOnly }}
+        />
+      )}
 
       {loading && groups.length === 0 && (
         <div className="empty-state">
@@ -172,6 +192,8 @@ export function CrossDedupPanel() {
                 <span style={{ fontFamily: 'monospace', wordBreak: 'break-all', color: 'var(--text-primary)' }}>
                   [{g.keeper_folder}] {g.keeper}
                 </span>
+                {g.ai_resolved && <span title="Keeper chosen by AI" style={{ flexShrink: 0, color: 'var(--accent)', fontSize: '0.7rem' }}>AI</span>}
+                {g.ambiguous && !g.ai_resolved && <span title="Rule couldn't decide" style={{ flexShrink: 0, color: 'var(--warning)', fontSize: '0.7rem' }}>?</span>}
                 <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', flexShrink: 0 }}>{g.reclaim_mb} MB</span>
               </div>
               {g.removes.map((r: any, j: number) => (

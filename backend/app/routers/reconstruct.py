@@ -307,14 +307,32 @@ class PinnedApplyRequest(BaseModel):
 
 @router.post("/pinned/quarantine")
 async def pinned_quarantine(request: PinnedApplyRequest):
-    """Quarantine every -pinned artifact that has a byte-identical clean twin.
-    MD5-verified at apply time. Reversible."""
+    """Start a background job that quarantines every -pinned artifact with a
+    byte-identical clean twin. MD5-verified, cancellable, reversible."""
     if not request.confirm:
         raise HTTPException(status_code=400, detail="confirm=true required")
-    res = rc.pinned_quarantine(confirm=True)
-    if res.get("error"):
-        raise HTTPException(status_code=400, detail=res["error"])
-    return res
+    try:
+        job_id = rc.pinned_quarantine(confirm=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"job_id": job_id, "status": "started"}
+
+
+@router.get("/pinned/quarantine/status/{job_id}")
+async def pinned_quarantine_status(job_id: str):
+    job = rc.get_pinned_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.post("/pinned/quarantine/cancel/{job_id}")
+async def pinned_quarantine_cancel(job_id: str):
+    """Stop a running pinned quarantine cleanly. Already-moved files stay in the
+    manifest and are undoable."""
+    if not rc.cancel_pinned_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"cancelling": True}
 
 
 @router.post("/pinned/rename")

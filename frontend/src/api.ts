@@ -488,6 +488,54 @@ export const api = {
     return handleResponse<any>(response);
   },
 
+  async crossdedupCancel(jobId: string) {
+    const response = await fetch(`${API_BASE}/crossdedup/cancel/${jobId}`, { method: 'POST' });
+    return handleResponse<any>(response);
+  },
+
+  // Keeper guidance (voice-driven rule + AI ambiguity resolution)
+  async crossdedupGetRule() {
+    const response = await fetch(`${API_BASE}/crossdedup/rule`);
+    return handleResponse<any>(response);
+  },
+
+  async crossdedupSetRule(patch: Record<string, any>) {
+    const response = await fetch(`${API_BASE}/crossdedup/rule`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async crossdedupGuidanceChat(message: string, history: { role: string; content: string }[]) {
+    const response = await fetch(`${API_BASE}/crossdedup/guidance/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, history }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async crossdedupResolveAmbiguous(opts: { guidance?: string; preferFolder?: string; snapshotOnly?: boolean; maxGroups?: number } = {}) {
+    const response = await fetch(`${API_BASE}/crossdedup/resolve-ambiguous`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        guidance: opts.guidance ?? '',
+        prefer_folder: opts.preferFolder ?? 'organized',
+        snapshot_only: opts.snapshotOnly ?? true,
+        max_groups: opts.maxGroups ?? 200,
+      }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async crossdedupClearOverrides() {
+    const response = await fetch(`${API_BASE}/crossdedup/clear-ai-overrides`, { method: 'POST' });
+    return handleResponse<any>(response);
+  },
+
   async crossdedupUndo(manifestFile: string) {
     const response = await fetch(`${API_BASE}/crossdedup/undo`, {
       method: 'POST',
@@ -509,6 +557,16 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ confirm: true }),
     });
+    return handleResponse<any>(response);   // { job_id, status }
+  },
+
+  async pinnedQuarantineStatus(jobId: string) {
+    const response = await fetch(`${API_BASE}/reconstruct/pinned/quarantine/status/${jobId}`);
+    return handleResponse<any>(response);
+  },
+
+  async pinnedQuarantineCancel(jobId: string) {
+    const response = await fetch(`${API_BASE}/reconstruct/pinned/quarantine/cancel/${jobId}`, { method: 'POST' });
     return handleResponse<any>(response);
   },
 
