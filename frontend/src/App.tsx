@@ -11,11 +11,12 @@ import { ResolverPanel } from './components/ResolverPanel'
 import { FolderRenamerPanel } from './components/FolderRenamerPanel'
 import { FolderReconcilerPanel } from './components/FolderReconcilerPanel'
 import { PurgeByNamePanel } from './components/PurgeByNamePanel'
+import { CrossDedupPanel } from './components/CrossDedupPanel'
 import { DedupAdvisorPanel } from './components/DedupAdvisorPanel'
 import { SettingsPanel } from './components/SettingsPanel'
 import { useScanJob } from './useScanJob'
 
-type View = 'scan' | 'duplicates' | 'resolver' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming' | 'folders' | 'reconciler' | 'purge' | 'advisor' | 'settings'
+type View = 'scan' | 'duplicates' | 'resolver' | 'extract' | 'media' | 'visual' | 'analysis' | 'renaming' | 'folders' | 'reconciler' | 'purge' | 'crossdedup' | 'advisor' | 'settings'
 
 function App() {
   const [currentView, setCurrentView] = useState<View>('scan')
@@ -129,6 +130,12 @@ function App() {
               Find &amp; Purge
             </li>
             <li
+              className={currentView === 'crossdedup' ? 'active' : ''}
+              onClick={() => setCurrentView('crossdedup')}
+            >
+              Cross-Folder Dedup
+            </li>
+            <li
               className={currentView === 'advisor' ? 'active' : ''}
               onClick={() => setCurrentView('advisor')}
             >
@@ -191,6 +198,7 @@ function App() {
           {currentView === 'folders' && <FolderRenamerPanel />}
           {currentView === 'reconciler' && <FolderReconcilerPanel />}
           {currentView === 'purge' && <PurgeByNamePanel />}
+          {currentView === 'crossdedup' && <CrossDedupPanel />}
           {currentView === 'advisor' && <DedupAdvisorPanel />}
           {currentView === 'settings' && <SettingsPanel />}
           {currentView === 'extract' && <ExtractPanel />}

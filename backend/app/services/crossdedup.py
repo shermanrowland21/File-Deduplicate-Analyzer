@@ -83,7 +83,20 @@ def _pick_keeper(copies: list, prefer_folder: str) -> dict:
     return sorted(pool, key=key)[0]
 
 
-def _build_groups(prefer_folder: str) -> dict:
+def _build_groups(prefer_folder: str, cross_only: bool = False,
+                  snapshot_only: bool = False) -> dict:
+    """Build duplicate groups across/within the two folders.
+
+    snapshot_only=True (STRICT, recommended for "clean Dropbox against Organized
+    as master"): the ONLY files ever queued for removal are files under
+    Snapshot, and only when a copy of the same content exists in Organized (so
+    Organized is the guaranteed keeper). NO Organized file is ever touched — not
+    within-Organized dupes, not '-pinned' artifacts, nothing. Snapshot-unique
+    files (no Organized twin) are kept. This is the safest master-preserving mode.
+
+    cross_only=True (looser): keep only groups that span BOTH folders, then drop
+    every redundant copy in the group (can include redundant Organized copies).
+    Kept for completeness; snapshot_only takes precedence when both are set."""
     by_md5: dict = {}
     _load_index(mi.open_index(ORGANIZED_ROOT).db_path, "organized", by_md5)
     _load_index(mi.open_index(SNAPSHOT_ROOT).db_path, "snapshot", by_md5)
@@ -96,12 +109,36 @@ def _build_groups(prefer_folder: str) -> dict:
     for md5, copies in by_md5.items():
         if len(copies) < 2:
             continue
+        folders = {c["folder"] for c in copies}
+        is_cross = len(folders) > 1
+
+        if snapshot_only:
+            # Only remove Snapshot files that ALSO exist in Organized.
+            organized_copies = [c for c in copies if c["folder"] == "organized"]
+            snapshot_copies = [c for c in copies if c["folder"] == "snapshot"]
+            if not organized_copies or not snapshot_copies:
+                continue   # no Organized keeper, or nothing in Snapshot -> skip
+            # keeper is the cleanest Organized copy; Organized is NEVER removed
+            keeper = _pick_keeper(organized_copies, "organized")
+            redundant = snapshot_copies   # remove ALL snapshot copies (Organized survives)
+            gb = sum(c["size"] for c in redundant)
+            groups.append({
+                "md5": md5, "keeper": keeper, "redundant": redundant,
+                "cross_folder": True, "reclaim": gb,
+            })
+            redundant_files += len(redundant)
+            reclaimable += gb
+            cross_groups += 1
+            cross_files += len(redundant)
+            cross_bytes += gb
+            continue
+
+        if cross_only and not is_cross:
+            continue   # skip within-folder-only groups entirely
         keeper = _pick_keeper(copies, prefer_folder)
         redundant = [c for c in copies if c["path"] != keeper["path"]]
         if not redundant:
             continue
-        folders = {c["folder"] for c in copies}
-        is_cross = len(folders) > 1
         gb = sum(c["size"] for c in redundant)
         groups.append({
             "md5": md5, "keeper": keeper, "redundant": redundant,
@@ -129,12 +166,16 @@ def _build_groups(prefer_folder: str) -> dict:
             "within_folder_groups": within_groups,
             "within_folder_redundant_files": within_files,
             "prefer_folder": prefer_folder,
+            "cross_only": cross_only,
+            "snapshot_only": snapshot_only,
         },
     }
 
 
-def preview(prefer_folder: str = "organized", examples: int = 12) -> dict:
-    data = _build_groups(prefer_folder)
+def preview(prefer_folder: str = "organized", examples: int = 12,
+            cross_only: bool = False, snapshot_only: bool = False) -> dict:
+    data = _build_groups(prefer_folder, cross_only=cross_only,
+                         snapshot_only=snapshot_only)
     s = data["summary"]
     ex = []
     for g in data["groups"][:examples]:
@@ -146,6 +187,62 @@ def preview(prefer_folder: str = "organized", examples: int = 12) -> dict:
             "reclaim_mb": round(g["reclaim"] / 1024 / 1024, 1),
         })
     return {"summary": s, "examples": ex}
+
+
+# --------------------------------------------------------------- paged view
+# Cache the last-built groups so the UI can page without rebuilding (~30s) each
+# request. Keyed by (prefer_folder, cross_only). Invalidated on purge/undo.
+_groups_cache: dict = {}
+
+
+def _get_cached_groups(prefer_folder: str, cross_only: bool,
+                       snapshot_only: bool) -> dict:
+    key = (prefer_folder, cross_only, snapshot_only)
+    if key not in _groups_cache:
+        _groups_cache[key] = _build_groups(prefer_folder, cross_only=cross_only,
+                                           snapshot_only=snapshot_only)
+    return _groups_cache[key]
+
+
+def clear_cache():
+    _groups_cache.clear()
+
+
+def groups_page(prefer_folder: str = "organized", cross_only: bool = True,
+                snapshot_only: bool = False, offset: int = 0, limit: int = 100,
+                folder_filter: str = "") -> dict:
+    """Paged view of duplicate groups for the review UI. Returns the summary plus
+    a slice of groups, each with the keeper and the exact files queued to be
+    quarantined. Cached so paging is instant after the first build."""
+    data = _get_cached_groups(prefer_folder, cross_only, snapshot_only)
+    groups = data["groups"]
+    if folder_filter:
+        ff = folder_filter.lower()
+        groups = [g for g in groups
+                  if ff in g["keeper"]["path"].lower()
+                  or any(ff in r["path"].lower() for r in g["redundant"])]
+    total = len(groups)
+    page = groups[offset:offset + limit]
+    out = []
+    for g in page:
+        out.append({
+            "md5": g["md5"],
+            "keeper": g["keeper"]["path"],
+            "keeper_folder": g["keeper"]["folder"],
+            "cross_folder": g["cross_folder"],
+            "reclaim_mb": round(g["reclaim"] / 1024 / 1024, 1),
+            "removes": [{"path": r["path"], "folder": r["folder"],
+                         "size_mb": round(r["size"] / 1024 / 1024, 1)}
+                        for r in g["redundant"]],
+        })
+    return {
+        "summary": data["summary"],
+        "total_groups": total,
+        "offset": offset,
+        "limit": limit,
+        "filtered": bool(folder_filter),
+        "groups": out,
+    }
 
 
 # ----------------------------------------------------------------- apply
@@ -164,16 +261,21 @@ def _collision_safe(dst: str) -> str:
     return f"{stem}__{i}{ext}"
 
 
-def purge(prefer_folder: str = "organized", confirm: bool = False) -> str:
-    """Start a background job that quarantines redundant copies. Returns job id."""
+def purge(prefer_folder: str = "organized", confirm: bool = False,
+          cross_only: bool = False, snapshot_only: bool = False) -> str:
+    """Start a background job that quarantines redundant copies. Returns job id.
+    snapshot_only=True removes ONLY Snapshot files that also exist in Organized
+    (Organized is never touched). cross_only=True limits to cross-folder groups."""
     if not confirm:
         raise ValueError("confirm=true required")
     job_id = f"crossdedup_{int(time.time())}"
     _jobs[job_id] = {"status": "running", "phase": "grouping",
-                     "prefer_folder": prefer_folder, "quarantined": 0,
+                     "prefer_folder": prefer_folder, "cross_only": cross_only,
+                     "snapshot_only": snapshot_only, "quarantined": 0,
                      "reclaimed_bytes": 0, "errors": 0, "started_at": time.time(),
                      "manifest_file": None}
-    threading.Thread(target=_purge_worker, args=(job_id, prefer_folder),
+    threading.Thread(target=_purge_worker,
+                     args=(job_id, prefer_folder, cross_only, snapshot_only),
                      daemon=True).start()
     return job_id
 
@@ -182,11 +284,13 @@ def get_job(job_id: str):
     return _jobs.get(job_id)
 
 
-def _purge_worker(job_id: str, prefer_folder: str):
+def _purge_worker(job_id: str, prefer_folder: str, cross_only: bool = False,
+                  snapshot_only: bool = False):
     job = _jobs[job_id]
     try:
         os.makedirs(_MANIFEST_DIR, exist_ok=True)
-        data = _build_groups(prefer_folder)
+        data = _build_groups(prefer_folder, cross_only=cross_only,
+                             snapshot_only=snapshot_only)
         job["phase"] = "quarantining"
         stamp = time.strftime("%Y%m%d_%H%M%S")
         q_roots = {
@@ -195,7 +299,8 @@ def _purge_worker(job_id: str, prefer_folder: str):
         }
         mpath = os.path.join(_MANIFEST_DIR, f"crossdedup_{int(time.time()*1000)}.json")
         manifest = {"action": "crossdedup", "at": time.time(),
-                    "prefer_folder": prefer_folder, "entries": []}
+                    "prefer_folder": prefer_folder, "cross_only": cross_only,
+                    "snapshot_only": snapshot_only, "entries": []}
         job["manifest_file"] = mpath
 
         def flush():
@@ -234,6 +339,7 @@ def _purge_worker(job_id: str, prefer_folder: str):
                 except OSError:
                     job["errors"] += 1
         flush()
+        clear_cache()   # files moved — stale group cache no longer valid
         job["status"] = "completed"; job["phase"] = "complete"
         job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
     except Exception as e:
@@ -260,4 +366,5 @@ def undo(manifest_file: str, confirm: bool = False) -> dict:
             os.rename(cur, orig); restored += 1
         except OSError as ex:
             errors.append(f"{cur}: {ex}")
+    clear_cache()   # files restored — stale group cache no longer valid
     return {"restored": restored, "errors": errors}

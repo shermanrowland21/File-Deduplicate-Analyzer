@@ -458,4 +458,42 @@ export const api = {
     });
     return handleResponse<any>(response);
   },
+
+  // Cross-folder dedup (Organized vs Dropbox-Snapshot).
+  // snapshotOnly=true (default): remove ONLY Snapshot files that also exist in
+  // Organized; Organized is never touched.
+  async crossdedupGroups(opts: { preferFolder?: string; snapshotOnly?: boolean; offset?: number; limit?: number; folderFilter?: string } = {}) {
+    const p = new URLSearchParams({
+      prefer_folder: opts.preferFolder ?? 'organized',
+      snapshot_only: String(opts.snapshotOnly ?? true),
+      offset: String(opts.offset ?? 0),
+      limit: String(opts.limit ?? 100),
+      folder_filter: opts.folderFilter ?? '',
+    });
+    const response = await fetch(`${API_BASE}/crossdedup/groups?${p.toString()}`);
+    return handleResponse<any>(response);
+  },
+
+  async crossdedupPurge(preferFolder: string, snapshotOnly: boolean) {
+    const response = await fetch(`${API_BASE}/crossdedup/purge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefer_folder: preferFolder, snapshot_only: snapshotOnly, confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async crossdedupStatus(jobId: string) {
+    const response = await fetch(`${API_BASE}/crossdedup/status/${jobId}`);
+    return handleResponse<any>(response);
+  },
+
+  async crossdedupUndo(manifestFile: string) {
+    const response = await fetch(`${API_BASE}/crossdedup/undo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manifest_file: manifestFile, confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
 };
