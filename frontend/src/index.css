@@ -975,3 +975,168 @@ body {
   width: 18px;
   height: 18px;
 }
+
+/* ------------------------------------------------------------------ */
+/* Voice input (VoiceInput.tsx) — ported from AI-Research-Cowork.       */
+/* Themed via the app's CSS variables so it works in light + dark.      */
+/* ------------------------------------------------------------------ */
+.mic-area {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.btn-mic,
+.btn-mic-menu {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-mic {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+}
+
+.btn-mic:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.btn-mic.recording {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+
+.btn-mic-menu {
+  width: 16px;
+  height: 38px;
+  border-radius: var(--radius);
+  font-size: 0.55rem;
+  padding: 0;
+}
+
+.btn-mic:disabled,
+.btn-mic-menu:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mic-dropdown {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 220px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.mic-option {
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mic-option:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.mic-option.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Recording overlay bar — the parent input area should be position:relative
+   so this sits over the textarea. */
+.mic-recording-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 25;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mic-transcript {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  min-height: 1.2em;
+  max-height: 6em;
+  overflow-y: auto;
+  word-break: break-word;
+}
+
+.mic-viz-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mic-canvas {
+  flex: 1;
+  height: 24px;
+  width: 100%;
+}
+
+.mic-cancel,
+.mic-submit {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mic-cancel {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.mic-cancel:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+.mic-submit {
+  background: var(--accent);
+  color: #fff;
+}
+
+.mic-submit:hover {
+  background: var(--accent-hover);
+}

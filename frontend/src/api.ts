@@ -429,4 +429,33 @@ export const api = {
     const response = await fetch(`${API_BASE}/catalog/stats`);
     return handleResponse<any>(response);
   },
+
+  // Dedup / Routing Advisor (Step 3a)
+  async advisorConfig() {
+    const response = await fetch(`${API_BASE}/advisor/config`);
+    return handleResponse<any>(response);
+  },
+
+  async advisorUpdateConfig(patch: Record<string, any>) {
+    const response = await fetch(`${API_BASE}/advisor/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    return handleResponse<any>(response);
+  },
+
+  async advisorClassify(examples = 15) {
+    const response = await fetch(`${API_BASE}/advisor/classify?examples=${examples}`);
+    return handleResponse<any>(response);
+  },
+
+  async advisorChat(message: string, history: { role: string; content: string }[]) {
+    const response = await fetch(`${API_BASE}/advisor/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, history }),
+    });
+    return handleResponse<any>(response);
+  },
 };
