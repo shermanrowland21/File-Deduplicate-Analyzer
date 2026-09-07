@@ -1277,3 +1277,55 @@ body {
 .btn-voice-discard:hover { background: var(--danger); color: #fff; }
 .btn-voice-accept { background: var(--accent); color: #fff; }
 .btn-voice-accept:hover { background: var(--accent-hover); }
+
+/* ------------------------------------------------------------------ */
+/* PanelIntro — "what this screen does" banner at the top of each tab. */
+/* ------------------------------------------------------------------ */
+.panel-intro {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.panel-intro-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.panel-intro-head h2 {
+  font-size: 1.15rem;
+  margin: 0;
+}
+.panel-intro-starthere {
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.panel-intro-badge {
+  margin-left: auto;
+  font-size: 0.72rem;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+.panel-intro-what {
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  margin: 0 0 4px;
+  line-height: 1.5;
+}
+.panel-intro-usewhen {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin: 0;
+}
