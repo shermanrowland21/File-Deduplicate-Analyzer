@@ -220,3 +220,49 @@ async def clear_ai_overrides():
     """Discard all AI keeper overrides (revert to the deterministic rule)."""
     cd.clear_ai_overrides()
     return {"cleared": True}
+
+
+# --------------------------------------------------------------- junk purge
+
+@router.get("/junk/preview")
+async def junk_preview(examples: int = 15):
+    """DRY RUN — count system junk (._ sidecars, .DS_Store, Thumbs.db, temp) across
+    both folders. These are excluded from dedup and can be purged outright."""
+    return cd.junk_preview(examples=examples)
+
+
+@router.post("/junk/purge")
+async def junk_purge(request: PurgeRequest):
+    """Quarantine ALL system junk across both folders (reversible, cancellable)."""
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    try:
+        job_id = cd.junk_purge(confirm=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"job_id": job_id, "status": "started"}
+
+
+@router.get("/junk/status/{job_id}")
+async def junk_status(job_id: str):
+    job = cd.get_junk_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.post("/junk/cancel/{job_id}")
+async def junk_cancel(job_id: str):
+    if not cd.cancel_junk_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"cancelling": True}
+
+
+@router.post("/junk/undo")
+async def junk_undo(request: UndoRequest):
+    if not request.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true required")
+    res = cd.junk_undo(request.manifest_file, confirm=True)
+    if res.get("error"):
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res

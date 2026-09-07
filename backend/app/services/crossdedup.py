@@ -113,6 +113,27 @@ def _clean_score(name: str) -> int:
     return s
 
 
+# ---- system junk (never real content; excluded from dedup, purged separately) --
+_JUNK_NAMES = {".ds_store", "thumbs.db", "desktop.ini", ".localized", ".spotlight-v100"}
+_JUNK_EXTS = {".tmp", ".temp", ".download", ".crdownload", ".part"}
+
+
+def is_junk(path: str) -> bool:
+    """True for OS/sidecar/temp junk that isn't real content:
+      - macOS AppleDouble sidecars ('._<name>')
+      - .DS_Store / Thumbs.db / desktop.ini / .localized
+      - .tmp / .temp / .download / .crdownload / .part
+    These get filtered OUT of dedup grouping and purged on their own."""
+    base = os.path.basename(path.replace("\\", "/"))
+    low = base.lower()
+    if base.startswith("._"):
+        return True
+    if low in _JUNK_NAMES:
+        return True
+    ext = os.path.splitext(low)[1]
+    return ext in _JUNK_EXTS
+
+
 def _load_index(db_path: str, tag: str, into: dict):
     if not os.path.exists(db_path):
         return
@@ -120,6 +141,8 @@ def _load_index(db_path: str, tag: str, into: dict):
     try:
         for path, md5, size, mtime in c.execute(
                 "SELECT path, md5, size, mtime FROM files WHERE md5<>''"):
+            if is_junk(path):
+                continue   # never dedup system junk — it pollutes groups
             into.setdefault(md5, []).append(
                 {"path": path, "size": size or 0, "mtime": mtime or 0,
                  "folder": tag})
@@ -615,4 +638,166 @@ def undo(manifest_file: str, confirm: bool = False) -> dict:
         except OSError as ex:
             errors.append(f"{cur}: {ex}")
     clear_cache()   # files restored — stale group cache no longer valid
+    return {"restored": restored, "errors": errors}
+
+
+# ============================================================ system-junk purge
+# ._ AppleDouble sidecars, .DS_Store, Thumbs.db, desktop.ini, temp/partial files.
+# These are OS noise, never real content, so we quarantine ALL of them (no
+# keeper needed). Runs across BOTH folders. Reversible; cancellable.
+
+_junk_jobs: dict = {}
+
+
+def _scan_junk() -> list:
+    """Return every junk file path across both indexes as
+    [{"path", "folder", "size"}]. Junk is defined by is_junk()."""
+    out = []
+    for tag, root in (("organized", ORGANIZED_ROOT), ("snapshot", SNAPSHOT_ROOT)):
+        db = mi.open_index(root).db_path
+        if not os.path.exists(db):
+            continue
+        c = sqlite3.connect(db)
+        try:
+            for path, size in c.execute("SELECT path, size FROM files"):
+                if is_junk(path):
+                    out.append({"path": path, "folder": tag, "size": size or 0})
+        finally:
+            c.close()
+    return out
+
+
+def junk_preview(examples: int = 15) -> dict:
+    """DRY RUN — count system-junk files across both folders, with examples."""
+    items = _scan_junk()
+    by_kind = {"appledouble": 0, "ds_store": 0, "thumbs": 0, "desktop_ini": 0,
+               "temp": 0, "other": 0}
+    total_bytes = 0
+    for it in items:
+        total_bytes += it["size"]
+        base = os.path.basename(it["path"].replace("\\", "/")).lower()
+        if base.startswith("._"):
+            by_kind["appledouble"] += 1
+        elif base == ".ds_store":
+            by_kind["ds_store"] += 1
+        elif base == "thumbs.db":
+            by_kind["thumbs"] += 1
+        elif base == "desktop.ini":
+            by_kind["desktop_ini"] += 1
+        elif os.path.splitext(base)[1] in _JUNK_EXTS:
+            by_kind["temp"] += 1
+        else:
+            by_kind["other"] += 1
+    return {
+        "total": len(items),
+        "total_bytes": total_bytes,
+        "by_kind": by_kind,
+        "examples": [it["path"] for it in items[:examples]],
+    }
+
+
+def junk_purge(confirm: bool = False) -> str:
+    """Start a background job that quarantines ALL system-junk files across both
+    folders. Cancellable, reversible via manifest. Returns job id."""
+    if not confirm:
+        raise ValueError("confirm=true required")
+    job_id = f"junk_{int(time.time())}"
+    _junk_jobs[job_id] = {"status": "running", "phase": "scanning",
+                          "quarantined": 0, "reclaimed_bytes": 0, "errors": 0,
+                          "cancel": False, "manifest_file": None,
+                          "started_at": time.time()}
+    threading.Thread(target=_junk_worker, args=(job_id,), daemon=True).start()
+    return job_id
+
+
+def get_junk_job(job_id: str):
+    return _junk_jobs.get(job_id)
+
+
+def cancel_junk_job(job_id: str) -> bool:
+    job = _junk_jobs.get(job_id)
+    if not job:
+        return False
+    job["cancel"] = True
+    return True
+
+
+def _junk_worker(job_id: str):
+    job = _junk_jobs[job_id]
+    try:
+        os.makedirs(_MANIFEST_DIR, exist_ok=True)
+        items = _scan_junk()
+        job["total"] = len(items)
+        job["phase"] = "quarantining"
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        q_roots = {
+            "organized": os.path.join(ORGANIZED_ROOT, f"_JunkQuarantine_{stamp}"),
+            "snapshot": os.path.join(SNAPSHOT_ROOT, f"_JunkQuarantine_{stamp}"),
+        }
+        mpath = os.path.join(_MANIFEST_DIR, f"junk_{int(time.time()*1000)}.json")
+        manifest = {"action": "junk_purge", "at": time.time(), "entries": []}
+        job["manifest_file"] = mpath
+
+        def flush():
+            try:
+                tmp = mpath + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f)
+                os.replace(tmp, mpath)
+            except OSError:
+                pass
+        flush()
+
+        since = 0
+        cancelled = False
+        for it in items:
+            if job.get("cancel"):
+                cancelled = True
+                break
+            src = it["path"]
+            if not os.path.isfile(src):
+                continue
+            root = _root_for(it["folder"])
+            q_root = q_roots[it["folder"]]
+            try:
+                rel = os.path.relpath(os.path.abspath(src), os.path.abspath(root))
+                dest = _collision_safe(os.path.join(q_root, rel))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                os.rename(src, dest)
+                manifest["entries"].append({"from": os.path.abspath(src), "to": dest})
+                job["quarantined"] += 1
+                job["reclaimed_bytes"] += it["size"]
+                since += 1
+                if since >= 100:
+                    flush(); since = 0
+            except OSError:
+                job["errors"] += 1
+        flush()
+        job["status"] = "cancelled" if cancelled else "completed"
+        job["phase"] = "cancelled" if cancelled else "complete"
+        job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
+    except Exception as e:
+        job["status"] = "error"; job["error"] = str(e)
+
+
+def junk_undo(manifest_file: str, confirm: bool = False) -> dict:
+    if not confirm:
+        return {"error": "confirm=true required"}
+    if not os.path.exists(manifest_file):
+        return {"error": "manifest not found"}
+    with open(manifest_file, encoding="utf-8") as f:
+        man = json.load(f)
+    restored = 0
+    errors = []
+    for e in man.get("entries", []):
+        cur, orig = e["to"], e["from"]
+        try:
+            if not os.path.isfile(cur):
+                errors.append(f"missing: {cur}"); continue
+            if os.path.exists(orig):
+                errors.append(f"orig exists: {orig}"); continue
+            os.makedirs(os.path.dirname(orig), exist_ok=True)
+            os.rename(cur, orig); restored += 1
+        except OSError as ex:
+            errors.append(f"{cur}: {ex}")
     return {"restored": restored, "errors": errors}

@@ -33,6 +33,7 @@ export function CrossDedupPanel() {
   const [notice, setNotice] = useState('')
   const [job, setJob] = useState<any>(null)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
+  const [guidancePending, setGuidancePending] = useState(false)
   // Persist the last purge manifest so the Undo button survives a page reload.
   const [manifest, setManifestState] = useState<string | null>(
     () => localStorage.getItem('crossdedup-last-manifest')
@@ -61,6 +62,54 @@ export function CrossDedupPanel() {
 
   // First build can take ~30s (hashes 1.3M rows into groups); reload on toggle.
   useEffect(() => { load(0, filter) }, [snapshotOnly])
+
+  // ---- System-junk cleanup (._ sidecars, .DS_Store, temp) ----
+  const [junk, setJunk] = useState<any>(null)
+  const [junkJob, setJunkJob] = useState<any>(null)
+  const [junkJobId, setJunkJobId] = useState<string | null>(null)
+  const [junkManifest, setJunkManifest] = useState<string | null>(() => localStorage.getItem('junk-last-manifest'))
+  const junkPoll = useState<{ id: number | null }>({ id: null })[0]
+
+  const loadJunk = async () => { try { setJunk(await api.junkPreview()) } catch { /* */ } }
+  useEffect(() => { loadJunk() }, [])
+
+  const runJunkPurge = async () => {
+    if (!window.confirm(
+      `Quarantine ${(junk?.total ?? 0).toLocaleString()} system-junk files (._ sidecars, .DS_Store, Thumbs.db, temp)?\n\n` +
+      `These are OS noise, not your content. Moved to a reversible _JunkQuarantine folder. You can Undo.`)) return
+    try {
+      const r = await api.junkPurge()
+      setJunkJobId(r.job_id)
+      if (junkPoll.id) clearInterval(junkPoll.id)
+      junkPoll.id = window.setInterval(async () => {
+        try {
+          const j = await api.junkStatus(r.job_id)
+          setJunkJob(j)
+          if (j.status === 'completed' || j.status === 'error' || j.status === 'cancelled') {
+            if (junkPoll.id) { clearInterval(junkPoll.id); junkPoll.id = null }
+            setJunkJobId(null)
+            if (j.status !== 'error') {
+              setJunkManifest(j.manifest_file || null)
+              if (j.manifest_file) localStorage.setItem('junk-last-manifest', j.manifest_file)
+              await loadJunk()
+              load(0, filter)   // dedup groups are cleaner now
+            }
+          }
+        } catch { /* keep polling */ }
+      }, 1200)
+    } catch (e: any) { setError(e.message || 'Junk purge failed') }
+  }
+  const cancelJunk = async () => { if (junkJobId) { try { await api.junkCancel(junkJobId) } catch { /* */ } } }
+  const undoJunk = async () => {
+    if (!junkManifest) return
+    if (!window.confirm('Restore all quarantined junk files?')) return
+    try {
+      const r = await api.junkUndo(junkManifest)
+      setNotice(`Restored ${(r.restored ?? 0).toLocaleString()} junk files.`)
+      setJunkManifest(null); localStorage.removeItem('junk-last-manifest')
+      await loadJunk()
+    } catch (e: any) { setError(e.message || 'Undo failed') }
+  }
 
   // In snapshot_only mode the summary's redundant_files IS the snapshot-only set.
   const queuedFiles = summary?.redundant_files
@@ -119,8 +168,31 @@ export function CrossDedupPanel() {
     }
   }
 
+  const junkRunning = !!junkJobId
+
   return (
     <div>
+      {junk && junk.total > 0 && (
+        <div className="card" style={{ borderLeft: '3px solid var(--warning)' }}>
+          <div className="card-header"><h3>System junk (excluded from dedup)</h3></div>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+            {junk.total.toLocaleString()} OS-noise files (macOS <code>._</code> sidecars, <code>.DS_Store</code>,{' '}
+            <code>Thumbs.db</code>, temp) — not your content. These were polluting the dedup view; purge them so
+            the duplicate list only shows real files. Reversible.
+          </p>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button className="btn btn-danger" onClick={runJunkPurge} disabled={junkRunning}>
+              {junkRunning ? <><span className="spinner" /> Purging junk… ({num(junkJob?.quarantined || 0)})</> : `Purge ${junk.total.toLocaleString()} junk files`}
+            </button>
+            {junkRunning && <button className="btn btn-secondary" onClick={cancelJunk}>Cancel</button>}
+            {junkManifest && !junkRunning && <button className="btn btn-secondary" onClick={undoJunk}>↩ Undo junk purge</button>}
+            <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+              {junk.by_kind?.appledouble?.toLocaleString() || 0} sidecars · {junk.by_kind?.ds_store || 0} .DS_Store · {junk.by_kind?.temp || 0} temp
+            </span>
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div className="card-header"><h2>Cross-Folder Dedup</h2></div>
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
@@ -159,7 +231,7 @@ export function CrossDedupPanel() {
           <button className="btn btn-secondary btn-sm" onClick={() => load(0, filter)} disabled={loading || running}>
             {loading ? <><span className="spinner" /> Building…</> : 'Apply filter'}
           </button>
-          <button className="btn btn-danger" onClick={runPurge} disabled={running || !summary || !queuedFiles}>
+          <button className="btn btn-danger" onClick={runPurge} disabled={running || !summary || !queuedFiles || guidancePending}>
             {running ? <><span className="spinner" /> Quarantining… ({num(job.quarantined)})</> : `Quarantine ${num(queuedFiles)} files`}
           </button>
           {running && (
@@ -173,9 +245,16 @@ export function CrossDedupPanel() {
         </div>
       </div>
 
+      {guidancePending && (
+        <div className="alert" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--warning)', fontSize: '0.82rem' }}>
+          ⚠ You have unapplied guidance below. <strong>Apply the rule first</strong> — Quarantine is disabled until you do.
+        </div>
+      )}
+
       {summary && (
         <KeeperGuidanceChat
           onRuleApplied={() => load(0, filter)}
+          onPendingChange={setGuidancePending}
           ambiguousCount={summary.ambiguous_groups || 0}
           resolveOpts={{ preferFolder, snapshotOnly }}
         />

@@ -32,6 +32,7 @@ export function PinnedCleanupPanel() {
   }
   const [job, setJob] = useState<any>(null)
   const [jobId, setJobId] = useState<string | null>(null)
+  const [guidancePending, setGuidancePending] = useState(false)
   const qPoll = useState<{ id: number | null }>({ id: null })[0]
 
   const load = async () => {
@@ -150,17 +151,22 @@ export function PinnedCleanupPanel() {
               <Stat label="Unique (rename)" value={num(preview.unique_count)} color="var(--warning)" />
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button className="btn btn-danger" onClick={runQuarantine} disabled={busy || !preview.redundant_count}>
+              <button className="btn btn-danger" onClick={runQuarantine} disabled={busy || !preview.redundant_count || guidancePending}>
                 {busy && jobId ? <><span className="spinner" /> Quarantining… ({num(job?.quarantined || 0)})</> : busy ? <><span className="spinner" /> Working…</> : `Quarantine ${num(preview.redundant_count)} redundant`}
               </button>
               {jobId && <button className="btn btn-secondary" onClick={cancelQuarantine}>Cancel</button>}
-              <button className="btn btn-secondary" onClick={runRename} disabled={busy || !preview.unique_count}>
+              <button className="btn btn-secondary" onClick={runRename} disabled={busy || !preview.unique_count || guidancePending}>
                 Rename {num(preview.unique_count)} unique
               </button>
               {qManifest && !jobId && <button className="btn btn-secondary" onClick={() => undo('q')} title="Restore the last quarantine batch">↩ Undo quarantine</button>}
               {rManifest && <button className="btn btn-secondary" onClick={() => undo('r')} title="Restore the last rename batch">↩ Undo rename</button>}
               <button className="btn btn-secondary btn-sm" onClick={load} disabled={busy || loading}>Refresh</button>
             </div>
+            {guidancePending && (
+              <div className="alert" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--warning)', marginTop: 10, fontSize: '0.82rem' }}>
+                ⚠ You have unapplied guidance below. <strong>Apply the rule first</strong> — the Quarantine/Rename buttons are disabled until you do, so it doesn't run with the wrong keepers.
+              </div>
+            )}
           </>
         )}
       </div>
@@ -168,6 +174,7 @@ export function PinnedCleanupPanel() {
       {preview && (
         <KeeperGuidanceChat
           onRuleApplied={load}
+          onPendingChange={setGuidancePending}
           ambiguousCount={0}
           resolveOpts={{ preferFolder: 'organized', snapshotOnly: false }}
           placeholder="Tell me which copy to keep — e.g. “keep the copy in the more specific folder, not the generic one”…"

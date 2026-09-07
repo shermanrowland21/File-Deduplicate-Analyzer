@@ -536,6 +536,34 @@ export const api = {
     return handleResponse<any>(response);
   },
 
+  // System-junk purge (._ sidecars, .DS_Store, Thumbs.db, temp)
+  async junkPreview() {
+    const response = await fetch(`${API_BASE}/crossdedup/junk/preview`);
+    return handleResponse<any>(response);
+  },
+  async junkPurge() {
+    const response = await fetch(`${API_BASE}/crossdedup/junk/purge`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
+  async junkStatus(jobId: string) {
+    const response = await fetch(`${API_BASE}/crossdedup/junk/status/${jobId}`);
+    return handleResponse<any>(response);
+  },
+  async junkCancel(jobId: string) {
+    const response = await fetch(`${API_BASE}/crossdedup/junk/cancel/${jobId}`, { method: 'POST' });
+    return handleResponse<any>(response);
+  },
+  async junkUndo(manifestFile: string) {
+    const response = await fetch(`${API_BASE}/crossdedup/junk/undo`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manifest_file: manifestFile, confirm: true }),
+    });
+    return handleResponse<any>(response);
+  },
+
   async crossdedupUndo(manifestFile: string) {
     const response = await fetch(`${API_BASE}/crossdedup/undo`, {
       method: 'POST',

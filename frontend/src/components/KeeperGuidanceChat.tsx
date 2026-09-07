@@ -13,11 +13,15 @@ interface Msg { role: 'user' | 'assistant'; content: string }
 
 export function KeeperGuidanceChat({
   onRuleApplied,
+  onPendingChange,
   ambiguousCount = 0,
   resolveOpts,
   placeholder = 'Tell me which copy to keep…',
 }: {
   onRuleApplied: () => void
+  /** Called with true when there's a proposed rule NOT yet applied — the parent
+   *  should disable its Run button until this goes false. */
+  onPendingChange?: (pending: boolean) => void
   ambiguousCount?: number
   resolveOpts: { preferFolder?: string; snapshotOnly?: boolean }
   placeholder?: string
@@ -42,6 +46,9 @@ export function KeeperGuidanceChat({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
+
+  // Tell the parent whether there's an unapplied rule so it can gate its Run button.
+  useEffect(() => { onPendingChange?.(!!proposal) }, [proposal, onPendingChange])
 
   const send = useCallback(async (text?: string) => {
     const msg = (text ?? input).trim()
