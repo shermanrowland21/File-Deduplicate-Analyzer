@@ -25,11 +25,24 @@ This module intentionally has no side effects on import.
 import os
 import csv
 import json
+import random
 import subprocess
 import threading
 import time
 from io import StringIO
 from typing import Optional
+
+# Substrings that signal Google is rate-limiting us (case-insensitive match on
+# GAM's stderr/stdout). When seen, back off and retry rather than hammering on.
+_RATE_LIMIT_SIGNS = (
+    "429", "ratelimitexceeded", "userratelimitexceeded", "quotaexceeded",
+    "rate limit", "too many requests", "backendror", "backend error",
+    "sharingratelimitexceeded",
+)
+
+# Small pace between downloads to stay under Google's per-user limits. Tunable
+# via env; 0 disables. A light default keeps a 22K run from spiking the API.
+_DOWNLOAD_PACE_SECONDS = float(os.environ.get("DELTA_DOWNLOAD_PACE", "0.15"))
 
 GAM_PATH = os.environ.get("GAM_PATH", r"C:\GAM7\gam.exe")
 ORGANIZED_ROOT = os.environ.get("ORGANIZED_ROOT", r"E:\Google Drive Files\Organized")
@@ -282,11 +295,19 @@ def _target_dir_for(kind: str, label: str, drive_relpath: str) -> str:
 # ---------------------------------------------------------------- apply phase
 
 def _gam_download(source_kind: str, source_id_or_user: str, admin_user: str,
-                  file_id: str, mime: str, target_dir: str, timeout: int = 900) -> bool:
+                  file_id: str, mime: str, target_dir: str, timeout: int = 900,
+                  max_retries: int = 5) -> str:
     """
     Download one Drive file into target_dir, converting native Google docs.
     source_id_or_user: the user email (user scope) — shared-drive files are also
     fetched via the admin user who has access.
+
+    Rate-limit aware: if Google throttles (HTTP 429 / userRateLimitExceeded /
+    rateLimitExceeded / quotaExceeded), back off exponentially with jitter and
+    retry up to max_retries. Returns a status string so the caller can pace:
+        "ok"        - downloaded
+        "throttled" - gave up after repeated 429s (transient; safe to re-run)
+        "failed"    - non-rate-limit failure
     """
     os.makedirs(target_dir, exist_ok=True)
     user = source_id_or_user if source_kind == "user" else admin_user
@@ -295,9 +316,25 @@ def _gam_download(source_kind: str, source_id_or_user: str, admin_user: str,
         _, ext = GOOGLE_EXPORT[mime]
         args += ["format", ext]
     args += ["targetfolder", target_dir]
-    r = subprocess.run(args, capture_output=True, text=True, timeout=timeout,
-                       encoding="utf-8", errors="replace")
-    return r.returncode == 0
+
+    delay = 2.0
+    for attempt in range(max_retries + 1):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True,
+                               timeout=timeout, encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            raise
+        if r.returncode == 0:
+            return "ok"
+        blob = ((r.stderr or "") + " " + (r.stdout or "")).lower()
+        throttled = any(sig in blob for sig in _RATE_LIMIT_SIGNS)
+        if throttled and attempt < max_retries:
+            # exponential backoff with jitter; cap the wait
+            time.sleep(min(delay, 60.0) + random.uniform(0, 1.5))
+            delay *= 2
+            continue
+        return "throttled" if throttled else "failed"
+    return "throttled"
 
 
 def apply_delta(report_file: str, admin_user: str = DEFAULT_ADMIN_USER,
@@ -313,7 +350,7 @@ def apply_delta(report_file: str, admin_user: str = DEFAULT_ADMIN_USER,
         "status": "running", "phase": "starting",
         "report_file": report_file, "admin_user": admin_user,
         "downloaded": 0, "converted": 0, "quarantined": 0,
-        "download_failed": 0, "delete_missing_local": 0,
+        "download_failed": 0, "delete_missing_local": 0, "throttled": 0,
         "adds_mods_total": 0, "deletions_total": 0,
         "current": "", "cancelled": False, "started_at": time.time(),
         "errors": [],
@@ -386,6 +423,10 @@ def _fetch_paths(source_kind: str, source_id: str, admin_user: str, label: str) 
 
 def _apply_worker(job_id, report_file, admin_user, do_downloads, do_deletions):
     job = _apply_jobs[job_id]
+    # Every absolute path we WRITE into Organized, so we can hash exactly those
+    # afterward (targeted, no full-tree re-walk).
+    downloaded_paths: list[str] = []
+    job["downloaded_paths_file"] = None
     try:
         with open(report_file, "r", encoding="utf-8") as f:
             report = json.load(f)
@@ -423,12 +464,33 @@ def _apply_worker(job_id, report_file, admin_user, do_downloads, do_deletions):
                     full_path = id_paths.get(fid, row.get("name", ""))
                     folder_only = os.path.dirname(full_path.replace("\\", "/"))
                     target_dir = _target_dir_for(kind, label, folder_only)
+                    # Snapshot the target dir so we can identify the file GAM
+                    # writes (GAM decides the final name, incl. export extension).
                     try:
-                        ok = _gam_download(kind, label, admin_user, fid, mime, target_dir)
-                        if ok:
+                        before = set(os.listdir(target_dir)) if os.path.isdir(target_dir) else set()
+                    except OSError:
+                        before = set()
+                    try:
+                        status = _gam_download(kind, label, admin_user, fid, mime, target_dir)
+                        if status == "ok":
                             job["downloaded"] += 1
                             if mime in GOOGLE_EXPORT:
                                 job["converted"] += 1
+                            # capture the newly-created file(s) for targeted hashing
+                            try:
+                                after = set(os.listdir(target_dir))
+                                for new_name in (after - before):
+                                    downloaded_paths.append(
+                                        os.path.abspath(os.path.join(target_dir, new_name)))
+                            except OSError:
+                                pass
+                        elif status == "throttled":
+                            job["throttled"] = job.get("throttled", 0) + 1
+                            job["download_failed"] += 1
+                            job["errors"].append(f"rate-limited (429) {fid}")
+                            # Google is pushing back — cool off before continuing
+                            # so we don't get the connection cut.
+                            time.sleep(min(5 + job["throttled"], 30))
                         else:
                             job["download_failed"] += 1
                     except subprocess.TimeoutExpired:
@@ -437,6 +499,9 @@ def _apply_worker(job_id, report_file, admin_user, do_downloads, do_deletions):
                     except Exception as e:
                         job["download_failed"] += 1
                         job["errors"].append(f"download {fid}: {e}")
+                    # gentle pace between downloads to stay under per-user limits
+                    if _DOWNLOAD_PACE_SECONDS > 0:
+                        time.sleep(_DOWNLOAD_PACE_SECONDS)
 
             # ---- DELETIONS: quarantine local copy ----
             if do_deletions:
@@ -463,12 +528,36 @@ def _apply_worker(job_id, report_file, admin_user, do_downloads, do_deletions):
                     else:
                         job["delete_missing_local"] += 1
 
+        # Persist the list of downloaded paths (inspectable + reusable).
+        if downloaded_paths:
+            os.makedirs(DELTA_DIR, exist_ok=True)
+            dl_file = os.path.join(DELTA_DIR, f"{job_id}_downloaded.json")
+            try:
+                with open(dl_file, "w", encoding="utf-8") as f:
+                    json.dump({"paths": downloaded_paths, "at": time.time()},
+                              f, ensure_ascii=False, indent=2)
+                job["downloaded_paths_file"] = dl_file
+            except OSError as e:
+                job["errors"].append(f"write downloaded list: {e}")
+
+        # TARGETED HASH: index exactly what we downloaded (no full-tree walk),
+        # so dedup/reconstruct see the new files immediately.
+        if downloaded_paths and not job.get("cancelled"):
+            job["phase"] = "hashing_new"
+            try:
+                from . import md5_index as mi
+                hstats = mi.index_paths(ORGANIZED_ROOT, downloaded_paths, min_size=0)
+                job["hash_stats"] = hstats
+            except Exception as e:
+                job["errors"].append(f"targeted hash: {e}")
+
         if not job.get("cancelled"):
             job["phase"] = "complete"
             job["status"] = "completed"
         else:
             job["status"] = "cancelled"
         job["quarantine_root"] = quarantine_root
+        job["downloaded_paths_count"] = len(downloaded_paths)
         job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
     except Exception as e:
         job["status"] = "error"
@@ -627,13 +716,14 @@ def _reexport_worker(job_id, admin_user, scope):
                         continue
                     # re-export fresh copy into the same folder
                     try:
-                        ok = _gam_download("user", user_for, admin_user, fid, mime, root)
-                        if ok:
+                        status = _gam_download("user", user_for, admin_user, fid, mime, root)
+                        if status == "ok":
                             job["reexported"] += 1
                         else:
-                            # restore backup on failure
+                            # restore backup on failure (incl. rate-limit)
                             shutil.move(bkp, full)
-                            job["errors"].append(f"reexport failed, restored {full}")
+                            job["errors"].append(
+                                f"reexport {status}, restored {full}")
                     except Exception as e:
                         try:
                             shutil.move(bkp, full)

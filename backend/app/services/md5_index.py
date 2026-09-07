@@ -292,3 +292,80 @@ def _build_worker(job_id: str, root: str, min_size: int):
             idx.close()
         except Exception:
             pass
+
+
+# ---- targeted hashing (hash a KNOWN list of files, no full-tree walk) ----
+
+def index_paths(root: str, paths: list[str], min_size: int = 0,
+                force: bool = False) -> dict:
+    """
+    Hash an EXPLICIT list of files into the index for `root`, writing rows
+    IDENTICAL to the full walker (same table, same (path, md5, size, mtime)).
+
+    This is the smart-catch-up path: after we DOWNLOAD known files into
+    Organized/, we already know exactly where they are — so we hash just those
+    instead of re-walking the whole tree. Same DB, so dedup/reconstruct see the
+    new files immediately.
+
+    - min_size=0 by default to MATCH the running full index (launched with
+      min_size=0); pass a threshold to skip small files if desired.
+    - Resumable: a file already indexed with the same (size, mtime) is skipped
+      unless force=True.
+    - Crash-safe: never raises on a single bad/locked/missing file; periodic
+      flush; final flush in finally.
+    Returns counts: {hashed, skipped_current, missing, errors, bytes_hashed}.
+    """
+    idx = open_index(root)
+    stats = {"hashed": 0, "skipped_current": 0, "missing": 0,
+             "errors": 0, "bytes_hashed": 0, "total": len(paths)}
+    last_flush = time.time()
+    try:
+        for p in paths:
+            try:
+                fp = os.path.abspath(p)
+                try:
+                    st = os.stat(_long_path(fp))
+                except (OSError, ValueError):
+                    stats["missing"] += 1
+                    continue
+                if not os.path.isfile(_long_path(fp)):
+                    stats["missing"] += 1
+                    continue
+                if min_size and st.st_size < min_size:
+                    continue
+                if not force:
+                    try:
+                        if idx.is_current(fp, st.st_size, st.st_mtime):
+                            stats["skipped_current"] += 1
+                            continue
+                    except Exception:
+                        pass  # if the check fails, just re-hash it
+                md5 = _compute_md5(fp)
+                if md5 is None:
+                    stats["errors"] += 1
+                    continue
+                try:
+                    idx.add(fp, md5, st.st_size, st.st_mtime)
+                except Exception:
+                    try:
+                        idx.flush(); idx.add(fp, md5, st.st_size, st.st_mtime)
+                    except Exception:
+                        stats["errors"] += 1
+                        continue
+                stats["hashed"] += 1
+                stats["bytes_hashed"] += st.st_size
+                if time.time() - last_flush > 10:
+                    try:
+                        idx.flush()
+                    except Exception:
+                        pass
+                    last_flush = time.time()
+            except Exception:
+                stats["errors"] += 1
+                continue
+    finally:
+        try:
+            idx.close()   # flushes on close
+        except Exception:
+            pass
+    return stats
