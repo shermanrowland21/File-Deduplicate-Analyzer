@@ -65,3 +65,8 @@ run_extraction.ps1
 
 # Local runtime data
 .file_dedup_analyzer/
+
+# detached runtime logs
+backend/detached_*.log
+backend/detached_*.log.err
+backend/*.log

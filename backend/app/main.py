@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search, archives, clientlog, resolver, foldernamer, filenamer, settings, reconciler, md5index, purge, catalog
+from .routers import scanner, duplicates, analysis, renaming, models, browser, media, visual_search, archives, clientlog, resolver, foldernamer, filenamer, settings, reconciler, md5index, purge, catalog, reconstruct
 
 app = FastAPI(
     title="File Deduplicate Analyzer",
@@ -44,6 +44,7 @@ app.include_router(reconciler.router, prefix="/api/reconciler", tags=["Folder Re
 app.include_router(md5index.router, prefix="/api/md5index", tags=["MD5 Index"])
 app.include_router(purge.router, prefix="/api/purge", tags=["Find & Purge"])
 app.include_router(catalog.router, prefix="/api/catalog", tags=["Filesystem Catalog"])
+app.include_router(reconstruct.router, prefix="/api/reconstruct", tags=["Reconstruct"])
 
 
 @app.get("/api/health")
