@@ -1,130 +1,162 @@
 # Project Handoff — File Dedup / Migration Cleanup
 
-Last updated: 2026-09-07. Read this first when starting a new session.
+Last updated: 2026-09-08. **Read this first when starting a new session.**
+Repo: `shermanrowland21/File-Deduplicate-Analyzer`, branch `master`. All work below
+is committed + pushed (HEAD `9f9d365`).
 
 ---
 
-## The big goal
+## The big goal (unchanged)
 
-Clean up a mangled data set and route it to its destinations before Dropbox is shut down.
-
-Two folders on the E: drive are the ENTIRE universe:
-- `E:\Google Drive Files\Organized`  (the mangled Google Takeout export — the "keep/clean" tree)
-- `E:\Dropbox-Snapshot`              (a robocopy snapshot of the live Dropbox; the throwaway staging copy)
+Clean up a mangled Google Takeout export and route it to its destinations before
+Dropbox is shut down. Two folders on the **E: drive** are the ENTIRE universe:
+- `E:\Google Drive Files\Organized`  — the mangled Takeout export; the **keep/master** tree
+- `E:\Dropbox-Snapshot`               — a robocopy snapshot of live Dropbox; the **throwaway** staging copy
 
 End state:
-- **Media files (video, images, design)** → go to **CPMS** (the Content Production Management System on AWS). NOT stored here long-term. Keep them in their descriptive folder structure; we need a migration PATH to push them up to AWS.
-- **Business docs (Word/PDF/Excel/etc.)** → go to **SharePoint** — both **USA and China** (certain folders belong to the China team).
-- Everything deduplicated and correctly organized first.
+- **Media** (video/images/design) → **CPMS** on AWS (keep folder structure; needs a migration path up to AWS).
+- **Business docs** (Word/PDF/Excel) → **SharePoint** — USA and China (some folders belong to the China team; engineering/CAD is China-bound).
+- Everything deduplicated + correctly organized first.
 
-Hard rules:
-- **NEVER hard-delete.** Everything is quarantine + reversible manifest.
-- **All AI must run on AWS Bedrock.** Never external. (Settings system routes per-function models to Bedrock.)
-- `D:\Highland Park Dropbox` is the LIVE Dropbox — DO NOT touch/dedupe it. Its scans were purged earlier. Work only on the two E: folders.
-
-Communication style: college-sophomore level, concise. See `.kiro/steering/communication-style.md`.
-
----
-
-## Where things stand RIGHT NOW
-
-### MD5 hashing (the foundation for everything)
-Full-file MD5 of ALL files (not just >50MB) in both folders. Needed because Google Drive only exposes MD5, so MD5 is the only hash that lets us match local files to Drive AND dedupe exactly.
-
-- Two standalone crash-proof supervisors run detached (survive Kiro crashes):
-  - `backend/md5_supervisor.py "E:\Google Drive Files\Organized"`
-  - `backend/md5_supervisor.py "E:\Dropbox-Snapshot"`
-  - Launch both via `backend/launch_detached_md5.ps1` (fixes space-in-path).
-- Index DBs: `~/.file_dedup_analyzer/md5_index/E_Google Drive Files_Organized.db` and `E_Dropbox-Snapshot.db`. Table `files(path PK, md5, size, mtime)`, indexed on md5. Resumable (skip path+size+mtime match).
-- Progress files: `~/.file_dedup_analyzer/md5_index/supervisor_*.json`; logs `backend/detached_*.log`.
-- STATUS as of last check: **Snapshot ~done** (664K files/4.07TB, final pass finding 0 new). **Organized NOT done** (631K files/6.17TB, still hashing videos on pass 3). WAITING for Organized to finish before the big folder cleanup.
-- Check status: read the supervisor_*.json, or query the DBs for COUNT(*)/SUM(size).
-
-### What's been CLEANED already (all reversible)
-- **`(N)` duplicate purge** (files like `video (1).mp4` that have a byte-identical clean twin): ran twice. Removed 108 (early) + 245 Organized + 385 Snapshot ≈ 738 files / ~54 GB. Quarantine dirs `_ParenDupeQuarantine_*` + manifests in `~/.file_dedup_analyzer/reconstruct/purge_manifests/`.
-- **Empty folder cleanup**: 32 + 8 empty junk folders quarantined.
-- **Flint Knapping folder merge** (test): merged split webinar twins; later found the manifest-on-timeout bug (now fixed with incremental manifest flush).
-
-### What's BUILT and ready (backend, all in `backend/app`)
-Routers registered in `main.py`. Backend runs on port 4600, serves the React UI too.
-
-- **md5_index.py** — full-MD5 indexer (hardened: never crashes on bad/locked/long-path files).
-- **drive_blueprint.py** + `blueprint_runner.py` — GAM crawl of ALL SHARED DRIVES ONLY (no My Drives) → `~/.file_dedup_analyzer/blueprint/blueprint.db` (`files(file_id,md5,name,drive_id,drive_name,rel_path,size,is_folder)`, indexed on md5). DONE: 443,183 Drive files indexed across 30 shared drives.
-- **reconstruct.py** (`/api/reconstruct`) — the Drive-driven repair:
-  - fix-ledger (`~/.file_dedup_analyzer/reconstruct/ledger.db`): matches local md5 → Drive md5 → correct name/path. Status matched/no_match. Organized match ran: ~162K matched / 55K no_match (partial, pre-full-hash).
-  - Phase 1 filename fix (`/rename/preview|apply|undo`): rename files in place to Drive-authoritative name, extension-safe, reversible.
-  - `(N)` dupe purge (`/parendupes/find|purge|undo`).
-  - MD5-driven folder analysis (`/folders/analyze`): classifies folders real/redundant/empty/unknown by CONTENT not name (so truncated real folders aren't mistaken for junk).
-  - merge-into-twin (`/folders/merge-plan|merge|merge-undo`): consolidate split webinar folders into the canonical Drive-named folder, skip byte-identical dupes, incremental reversible manifest.
-  - `/folders/validate` — compare a local folder's md5 set to Drive blueprint → matched/missing/extra/verdict.
-- **crossdedup.py** (`/api/crossdedup`) — CROSS-FOLDER dedup across the two E: folders using the two MD5 indexes:
-  - `/preview?prefer_folder=organized` — DRY RUN. Last result: **339,599 dup groups, 658,334 redundant files, 2,388.9 GB reclaimable** (cross-folder 225,486 groups/795.7GB; within-folder 114,113). 
-  - `/purge {prefer_folder, confirm}` → background job; `/status/{job}`; `/undo {manifest_file}`.
-  - Keeper rule: prefer_folder (organized|snapshot) then tiebreak shortest-path/cleanest-name(no (N)/-at-)/longest-name. Leave-one invariant. Only quarantines when a keeper survives (so a snapshot-only file is safe).
-- **catalog.py** (`/api/catalog`) — unified filesystem catalog for instant name search (built earlier, portable to CPMS).
-- **name_purge.py** (`/api/purge`) — Find & Purge by keyword (for the Brandon Dawson–type client purges). Reversible.
-- Also earlier work: scan_store, resolver (redesigned card UI), folder_reconciler, folder_namer/file_namer, settings (per-function Bedrock model), light/dark theme.
-
-### Git
-All committed + pushed to GitHub (repo: shermanrowland21/File-Deduplicate-Analyzer, branch master). Last commit c1bf003. **crossdedup.py + its router are NOT committed yet** — commit them.
+**Hard rules:**
+- **NEVER hard-delete.** Everything is quarantine + reversible manifest + Undo.
+- **All AI runs on AWS Bedrock.** Never external.
+- `D:\Highland Park Dropbox` is LIVE Dropbox — DO NOT touch. Work only on the two E: folders.
+- Communication style: college-sophomore level, concise. See `.kiro/steering/communication-style.md`.
 
 ---
 
-## THE AGREED PLAN (do in this order)
+## CURRENT STATE (as of this handoff)
 
-### STEP 1 — Fix Organized folder structure/names from Google Drive (FIRST)
-Once Organized hashing finishes:
-1. Run full Organized folder cleanup: `/folders/merge` (merge split twins into canonical Drive names), rename truncated folders, quarantine empties.
-2. Validate against Drive (`/folders/validate`) — confirm folders match what Google Drive has.
-This gives a clean, correctly-structured base BEFORE dedup decisions.
-Gotcha: folder moves make the hashers re-walk — that's why we wait for hashing to finish.
+### Foundation — DONE
+- **MD5 index of BOTH folders is complete** (full-file MD5, every file, min_size=0):
+  - Organized: **678,929 files, 100% hashed, 7.44 TB** (grew ~26K from the delta sync).
+  - Snapshot: **664,620 files hashed** + 54 new CAD files hashed after a manual delta update.
+  - Index DBs: `~/.file_dedup_analyzer/md5_index/E_Google Drive Files_Organized.db` and `E_Dropbox-Snapshot.db`. Table `files(path PK, md5, size, mtime)`, indexed on md5.
+- **Drive blueprint** (GAM crawl of all 30 shared drives): `~/.file_dedup_analyzer/blueprint/blueprint.db`, 443K Drive files.
 
-### STEP 2 — Cross-folder dedup, keeper = Organized
-Run `/api/crossdedup/purge {prefer_folder:"organized", confirm:true}`. ~2.3 TB reclaimable. Reversible.
-Nuance confirmed: if a file exists ONLY in Snapshot, keep it (tool already does this).
+### Delta sync — DONE (this session)
+- Ran the **overnight delta supervisor** (`backend/overnight_delta.py`): downloaded ALL adds/mods since the Takeout baseline `2026-07-13T19:50:41Z`, for BOTH shared drives AND all 56 users' My Drives, into Organized. Native Google Docs converted to Office (docx/xlsx/pptx). Everything MD5-hashed **incrementally** (batches of 300) as it arrived.
+- Progress file: `~/.file_dedup_analyzer/delta/overnight_progress.json` — shows `"stage": "done"`.
+- Deletions were NOT applied (downloads-only). If you want to quarantine Drive-deleted files locally later, that's a separate `apply_delta(..., do_deletions=True)` pass — but review first (mostly folders/sync-stubs; ~135 real superseded docs on sherman@).
 
-### STEP 3 — AI Dedupe/Routing Assistant (BUILD NEXT — build order below)
-Frames the problem as industry-standard "ROT" cleanup (Redundant/Obsolete/Trivial). Research confirmed the approach (RecordPoint, Securiti, MERAI arxiv paper): metadata-driven classification at scale, rules first, AI for the ambiguous middle, defensible (reversible) disposal, chunked AI + hash-index.
-
-Build in this order:
-- **(a) Principles chat + RULES engine FIRST** (deterministic, free, ~80% of decisions):
-  - A chat where the user STATES PRINCIPLES (by voice — see voice note below), the assistant REFLECTS BACK its understanding, user confirms, then it runs.
-  - Rules classify every file by: file TYPE (media→CPMS vs business→SharePoint), AGE, PATH/owner, DUP status → into R/O/T buckets + routing (CPMS media / SharePoint-US / SharePoint-China).
-  - Terminated-employee rule (user confirmed direction): if a dup also exists in an ACTIVE person's folder, keep the active copy; the terminated-person copy is redundant. Age + type factor in (old + graphic + duplicated → likely drop).
-- **(b) AI content-analysis layer SECOND** (Bedrock, chunked):
-  - For the ambiguous middle — read actual Word/PDF/doc content to label things ("legal agreement," "commission calculation," etc.), especially poorly-named files.
-  - Works on CHUNKS, leverages the MD5 DB, can be re-queried/re-chunked. Never processes all 658K at once.
-  - Model: **Claude Sonnet on AWS Bedrock** (strong multi-step reasoning + doc reading). Stays on Bedrock per hard rule.
-  - Advisory ONLY: AI proposes; deterministic reversible tools execute on user approval. AI never moves/deletes directly.
-  - Note: a lot of media content-analysis will happen in CPMS instead; here we focus on business docs/PDFs that need clearer definition.
-
-### Voice interface (user request)
-User HATES typing — wants a slick voice→text interface for the principles chat. User will provide code from their other tool. **PROMPT THE USER for that code when starting the chat UI.** Don't build voice from scratch first; use their proven component.
+### Dedup numbers (last dry-run, will shift slightly post-delta)
+- Cross-folder snapshot-only dedup: **~283K Snapshot files / ~791 GB** reclaimable (keep Organized, remove Snapshot twins). Organized never touched.
+- `-pinned` artifacts in Organized: ~15.4K redundant / 67 unique (folder-aware keeper now).
+- System junk (`._` sidecars, .DS_Store, etc.): **~48K files** — filtered out of dedup + purgeable.
 
 ---
 
-## Key principles the user stated (capture in the chat, refine with them)
-- Media files → CPMS/AWS; keep them in their descriptive folder structure; need migration path up to AWS, then out of this tree.
-- Business content → SharePoint US + China; certain folders belong to the China team.
-- Don't hard-delete — hide/quarantine; it's a big set that's hard to eyeball in a UI, so AI helps decide.
-- Terminated-employee files: transferred to owner (sherman) when people were let go; many duplicate other people's files. Keep if unique/important; if old + duplicated + low-value (e.g. 4-yr-old graphics), likely drop. Provenance (who/where it came from) matters.
-- Unnamed files (generic iPhone names, etc.): some analysis happens in CPMS; but some Word/PDFs here need content analysis to define what they are (legal agreements, commission calcs, groups of related data).
+## WHAT'S BUILT (all committed)
+
+### UI (React, served by backend on port 4600)
+Sidebar is now cleaned up — **legacy tabs retired** (Scan Directory, Duplicates, Resolver, Extract Archives, Folder Reconciler removed). Remaining tabs, each with a plain-language **PanelIntro** banner (what it does / safety / when to use):
+- **Cross-Folder Dedup** (START HERE) — snapshot-only dedup, junk-purge card at top, voice keeper-guidance chat, cancel + persistent Undo.
+- **Pinned Cleanup** — quarantine redundant `-pinned`, rename unique; folder-aware keeper; guidance chat.
+- **Dedup Advisor** — voice/chat principles → routing rules (CPMS / SharePoint-US / China), dry-run classification.
+- **Folder Renamer** — reads file content to fix mangled folder names (DeepSeek on Bedrock).
+- **Find & Purge**, **Media Intelligence**, **Visual Search**, **File Analysis**, **Smart Rename** (now has separator/case pickers — defaults to clean spaces, no underscores), **Settings**.
+
+### Backend services (backend/app/services)
+- **md5_index.py** — full-MD5 indexer + `index_paths(root, paths, min_size=0)` targeted hasher (hash a known list, no re-walk; resumable, crash-safe).
+- **crossdedup.py** — snapshot-only cross-folder dedup. `is_junk()` filter + `junk_purge` job. Keeper rule engine (`get_rule/set_rule`: prefer_folder, prefer_paths, avoid_paths, tiebreakers) + AI ambiguity resolution (`resolve_ambiguous`). Cancel + undo. Paged `groups_page`.
+- **drive_delta.py** — `detect()` (read-only), `apply_delta()` (downloads adds/mods, converts Google→Office, quarantines deletions), incremental hashing, 429 backoff + pacing. `reexport_native()` for flattened files.
+- **reconstruct.py** — Drive-blueprint match ledger, filename fix, `-pinned` cleanup (`pinned_preview/pinned_quarantine[bg job]/pinned_rename/pinned_undo`, folder-aware keeper).
+- **folder_reconciler.py** — per-parent reconcile + **NEW whole-tree reconciler** (see below).
+- **dedup_rules.py** / **dedup_advisor** — the principles→rules engine + Bedrock chat.
+- **settings_store.py** — per-function Bedrock model. **Models fixed this session** to active IDs: `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, `us.anthropic.claude-haiku-4-5-20251001-v1:0`, `deepseek.v3.2`. (Old `claude-3-5-*-20241022` and `us.deepseek.v3-v1:0` were dead — all replaced.)
+
+### Detached runner scripts (backend/)
+- `overnight_delta.py` — drives→users delta, unattended. DONE running.
+- `delta_apply_runner.py` — single-scope delta apply with progress file.
+- `delta_detect_runner.py` — read-only delta detect.
+- `reconcile_tree_runner.py` — whole-tree folder reconcile (preview|apply).
+- `md5_supervisor.py` / `launch_detached_md5.ps1` — original crash-proof MD5 hashers.
+
+---
+
+## ⚠️ THE OPEN ITEM — whole-tree folder reconciler has a BUG to fix
+
+Built this session (`folder_reconciler.reconcile_tree_preview / reconcile_tree / undo_tree`
+and `reconcile_tree_runner.py`). It walks all of Organized **deepest-first**, groups
+split-twin folders by an anchor (date + 14-char title prefix), merges them into one
+canonical folder, and quarantines empties. Local grouping only (no GAM — Drive
+validation across 50K folders = too many GAM calls). Reversible via a master manifest
+(`undo_tree`).
+
+**PREVIEW RESULT (read-only, nothing applied):**
+- 23,223 parent folders scanned
+- 263 merge groups, 77 shells, **157,104 files would move**, 6,608 empty folders to quarantine
+
+**THE BUG — do NOT run apply until fixed:** the twin-detection has **false positives**
+where the distinguishing token is at the END of the name. Example it wrongly grouped:
+```
+MERGE into: Unishipper Invoices to pay 2024
+  members: ...2022 | ...2023 | ...2024 | ...2025   ← FOUR DIFFERENT YEARS
+```
+The anchor only looks at the first 14 chars of the title, so folders differing only by
+a trailing **year** (2022 vs 2023) or number ("Part 2") get merged when they shouldn't.
+Merging those would collapse distinct folders (reversible, but wrong). The 157K
+files-moved is inflated by these bad groups.
+
+**THE FIX (next step):** tighten twin-detection so two candidate members are NOT merged
+if they differ only by a distinct trailing **year** or **number**. Then re-run preview
+(should be a smaller, safe set), review examples again, then apply. The GENUINE twins are
+truncation artifacts like `Sales Commission 2025_` + `Sales Commission 2025` (trailing
+`_`), which ARE correct to merge.
+
+Where to fix: the `_anchor()` grouping in `folder_reconciler.py` (line ~123) and/or add a
+guard in `reconcile_tree`/`_classify` that rejects a merge group whose members carry
+distinct trailing year/number tokens.
+
+---
+
+## THE PLAN / ORDER (agreed)
+
+1. **Delta sync** — ✅ DONE.
+2. **Whole-tree folder reconciliation FIRST** (before dedup) — fix mangled/split folder
+   structure so paths are clean before dedup decisions. ⚠️ Fix the twin bug above, then run.
+3. **Then dedup:**
+   - Purge **system junk** (the `._`/DS_Store card on Cross-Folder Dedup).
+   - **Pinned Cleanup** (clear `-pinned` artifacts).
+   - **Cross-Folder Dedup** snapshot-only (remove Snapshot twins, keep Organized) — ~791 GB.
+   - Use the **keeper-guidance voice chat** to set folder preferences before purging (the Run
+     button is gated until an applied rule exists, so you can't run with wrong keepers).
+4. **Dedup Advisor** — state principles by voice (terminated-employee files, media→CPMS,
+   China folders→China SharePoint) → routing classification.
+5. **Migration** (future): media→CPMS/AWS, business→SharePoint US/China. CPMS/S3 push is
+   NOT built yet (S3Storage is a placeholder).
+
+---
+
+## KEY PRINCIPLES the user stated (for the Advisor / keeper rules)
+- Media → CPMS/AWS, keep descriptive folder structure; need migration path up to AWS.
+- Business → SharePoint US + China; some folders are China team's; engineering/CAD is China-bound.
+- **Terminated-employee files**: transferred into `E:\Dropbox-Snapshot\Sherman Rowland\<Person>'s files\` (curly apostrophe U+2019). If a dup exists in an active person's folder, keep active; terminated copy is redundant. Nested (Nermeen's folder contains Joana's, Maricar's). ~2,299 files / 425 GB.
+- Keeper preference: when identical files sit in different folders, prefer the more specific/meaningful folder over generic dumps; the `-pinned` copy is often in the BETTER folder (so keeper is folder-aware, not name-based).
 - Discoverability of the final organized set matters a lot.
 
 ---
 
-## Operational notes / gotchas
-- Backend keeps dying between sessions — it's fine, just restart it (only affects the UI, not the detached hashing/blueprint jobs). Start it with env vars:
-  `$env:ORGANIZED_ROOT="E:\Google Drive Files\Organized"; $env:SNAPSHOT_ROOT="E:\Dropbox-Snapshot"; $env:GAM_ADMIN_USER="sherman@hplapidary.com"; $env:GAM_PATH="C:\GAM7\gam.exe"; & ".\venv\Scripts\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 4600 --log-level warning`
-- control_pwsh_process often reuses a DEAD terminal on first try (isReused:true) and won't actually start. Then stop it, verify port 4600 free, start again for a real fresh process.
-- PowerShell console sometimes swallows multi-line command output — use a scratch .py/.ps1 file and run it, or keep commands single-line. Delete scratch files after.
-- Machine won't sleep (confirmed) — long jobs run overnight fine.
-- URL: http://localhost:4600 (hard-refresh Ctrl+Shift+R for new bundles).
-- GAM at C:\GAM7\gam.exe, admin sherman@hplapidary.com. Marketing Dropbox shared drive id 0ABPjSvMd3ZyaUk9PVA.
-- Frontend build: `cd frontend; npm run build`.
+## OPERATIONAL NOTES / GOTCHAS
+- **Start the backend** (only affects the UI, not detached jobs):
+  `$env:ORGANIZED_ROOT="E:\Google Drive Files\Organized"; $env:SNAPSHOT_ROOT="E:\Dropbox-Snapshot"; $env:GAM_ADMIN_USER="sherman@hplapidary.com"; $env:GAM_PATH="C:\GAM7\gam.exe"; & ".\venv\Scripts\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 4600 --log-level warning`  (run in `backend/`)
+- **control_pwsh_process reuses a DEAD terminal** on first try (isReused:true) and won't actually start. Verify port 4600 with a health check; if not listening, stop + confirm port free + start again.
+- **Background jobs die on REBOOT** (not on Kiro restart). After a reboot, restart backend + any runner. Machine won't sleep — long jobs run overnight fine.
+- **PowerShell mangles multi-line commands / heredoc quotes** — use a scratch `.py`/`.ps1` file for anything complex, then delete it. Keep shell commands single-line.
+- **URL:** http://localhost:4600 — hard-refresh Ctrl+Shift+R for new bundles.
+- **GAM** at `C:\GAM7\gam.exe`, admin `sherman@hplapidary.com`.
+- **Frontend build:** `cd frontend; npm run build` (backend serves `frontend/dist` from disk — no backend restart needed for frontend-only changes, just refresh).
+- **Snapshot gets manual delta updates** — when it does, re-hash the new files. There's no UI button for this yet (used a scratch script: walk Snapshot, diff vs index by size+mtime, `mi.index_paths` the new ones). Worth building a "refresh Snapshot index" button.
 
-## Immediate next actions for the new session
-1. Commit crossdedup.py + router to git.
-2. Check if Organized hashing finished (supervisor json / DB counts).
-3. If done → STEP 1 (folder cleanup + validate), then STEP 2 (cross-dedup keep=organized).
-4. Build STEP 3(a): principles chat + rules engine. Prompt user for their voice-input code.
+## Progress-file locations (read these to check job state)
+- Delta: `~/.file_dedup_analyzer/delta/overnight_progress.json`, `apply_runner_progress.json`
+- Tree reconcile: `~/.file_dedup_analyzer/folder_reconcile/tree_runner_progress.json`
+- Manifests (for undo): `~/.file_dedup_analyzer/{crossdedup,reconstruct,folder_reconcile}/…`
+
+## IMMEDIATE NEXT ACTIONS for the new session
+1. Start the backend (command above); confirm http://localhost:4600 health.
+2. **Fix the whole-tree reconciler twin bug** (trailing year/number false positives) in `folder_reconciler.py`.
+3. Re-run `python reconcile_tree_runner.py preview`; review example_merges in the progress file; confirm clean.
+4. Run `python reconcile_tree_runner.py apply` (detached) — reversible via `undo_tree(master_manifest)`.
+5. Then move to dedup: junk purge → pinned cleanup → cross-folder snapshot-only dedup (with keeper guidance).
