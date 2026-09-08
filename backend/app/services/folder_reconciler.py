@@ -942,3 +942,210 @@ def _write_manifest(kind: str, data: dict) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     return path
+
+
+# ==================================================================
+# WHOLE-TREE reconciler — walk all of Organized and reconcile every folder.
+#
+# Uses the per-parent primitives (_classify / merge_group / delete_empty) but
+# drives them across the ENTIRE tree, DEEPEST-FIRST (merges move child folders,
+# so children must be processed before their parents). LOCAL grouping only
+# (drive_names=None) — Drive validation across ~50k folders would be hundreds of
+# thousands of GAM calls, impractical. Fully reversible: every child manifest is
+# recorded in a master manifest so the whole run can be undone in reverse.
+# ==================================================================
+
+_tree_jobs: dict = {}
+_TREE_MANIFEST_DIR = RECON_DIR
+
+
+def _iter_parents_deepest_first(root: str):
+    """Yield every directory under root that has ≥1 qualifying subfolder,
+    DEEPEST-FIRST, skipping our own quarantine/backup dirs."""
+    for dirpath, dirs, _files in os.walk(root, topdown=False):
+        # prune our dirs from descent bookkeeping
+        base = os.path.basename(dirpath.rstrip("\\/"))
+        if base.startswith(_OUR_DIRS):
+            continue
+        # does this dir have at least one real subfolder?
+        subs = [d for d in dirs if not d.startswith(_OUR_DIRS)]
+        if subs:
+            yield dirpath
+
+
+def reconcile_tree_preview(root: Optional[str] = None, examples: int = 20) -> dict:
+    """DRY RUN over the whole tree. Counts how many split-twin merges and empty-
+    folder quarantines WOULD happen, with examples. Changes nothing."""
+    root = root or ORGANIZED_ROOT
+    total_parents = 0
+    merge_groups = 0
+    shells_to_merge = 0
+    empties = 0
+    files_to_move = 0
+    ex_merges = []
+    ex_empties = []
+    for parent in _iter_parents_deepest_first(root):
+        total_parents += 1
+        try:
+            rep = _classify(parent, None)
+        except Exception:
+            continue
+        for g in rep["merge_groups"]:
+            merge_groups += 1
+            shells_to_merge += g["shell_count"]
+            files_to_move += g["total_files"]
+            if len(ex_merges) < examples:
+                ex_merges.append({
+                    "parent": parent,
+                    "canonical": g["canonical_name"],
+                    "members": [m["name"] for m in g["members"]],
+                    "total_files": g["total_files"],
+                })
+        for b in rep["backfill"]:
+            # backfill entries are empty folders (no content twin) -> quarantine
+            empties += 1
+            if len(ex_empties) < examples:
+                ex_empties.append(b["path"])
+    return {
+        "root": root,
+        "parents_scanned": total_parents,
+        "merge_groups": merge_groups,
+        "shells_to_merge": shells_to_merge,
+        "files_to_move": files_to_move,
+        "empty_folders": empties,
+        "example_merges": ex_merges,
+        "example_empties": ex_empties,
+    }
+
+
+def reconcile_tree(root: Optional[str] = None, do_merges: bool = True,
+                   do_empties: bool = True, confirm: bool = False) -> str:
+    """Start a background job that reconciles the WHOLE tree deepest-first:
+    merges split-twin folders and quarantines empty folders, all reversible.
+    Returns a job_id. Cancellable via cancel_tree_job."""
+    if not confirm:
+        raise ValueError("confirm=true required")
+    root = root or ORGANIZED_ROOT
+    job_id = f"foldtree_{int(time.time())}"
+    _tree_jobs[job_id] = {
+        "status": "running", "phase": "starting", "root": root,
+        "parents_done": 0, "merges": 0, "shells_quarantined": 0,
+        "files_moved": 0, "empties_quarantined": 0, "errors": 0,
+        "current": "", "cancel": False, "master_manifest": None,
+        "started_at": time.time(),
+    }
+    threading.Thread(target=_reconcile_tree_worker,
+                     args=(job_id, root, do_merges, do_empties), daemon=True).start()
+    return job_id
+
+
+def get_tree_job(job_id: str):
+    return _tree_jobs.get(job_id)
+
+
+def cancel_tree_job(job_id: str) -> bool:
+    j = _tree_jobs.get(job_id)
+    if not j:
+        return False
+    j["cancel"] = True
+    return True
+
+
+def _reconcile_tree_worker(job_id, root, do_merges, do_empties):
+    job = _tree_jobs[job_id]
+    os.makedirs(_TREE_MANIFEST_DIR, exist_ok=True)
+    master_path = os.path.join(_TREE_MANIFEST_DIR,
+                               f"tree_master_{int(time.time()*1000)}.json")
+    master = {"action": "reconcile_tree", "root": root, "at": time.time(),
+              "child_manifests": []}
+    job["master_manifest"] = master_path
+
+    def flush_master():
+        try:
+            tmp = master_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(master, f, ensure_ascii=False)
+            os.replace(tmp, master_path)
+        except OSError:
+            pass
+    flush_master()
+
+    try:
+        job["phase"] = "reconciling"
+        for parent in _iter_parents_deepest_first(root):
+            if job.get("cancel"):
+                job["status"] = "cancelled"; break
+            job["current"] = parent
+            job["parents_done"] += 1
+            try:
+                rep = _classify(parent, None)
+            except Exception as e:
+                job["errors"] += 1
+                continue
+
+            # 1) merges
+            if do_merges:
+                for g in rep["merge_groups"]:
+                    if job.get("cancel"):
+                        break
+                    try:
+                        res = merge_group(parent, g["canonical_name"],
+                                          [m["name"] for m in g["members"]],
+                                          confirm=True)
+                        if res.get("error"):
+                            job["errors"] += 1
+                        else:
+                            job["merges"] += 1
+                            st = res.get("stats", {})
+                            job["files_moved"] += st.get("moved", 0)
+                            job["shells_quarantined"] += st.get("quarantined_shells", 0)
+                            if res.get("manifest_file"):
+                                master["child_manifests"].append(res["manifest_file"])
+                    except Exception:
+                        job["errors"] += 1
+
+            # 2) empty-folder quarantine (backfill entries are the empties)
+            if do_empties and rep["backfill"]:
+                empty_paths = [b["path"] for b in rep["backfill"]]
+                try:
+                    res = delete_empty(empty_paths, confirm=True)
+                    job["empties_quarantined"] += res.get("quarantined_count", 0)
+                    if res.get("manifest_file"):
+                        master["child_manifests"].append(res["manifest_file"])
+                    if res.get("errors"):
+                        job["errors"] += len(res["errors"])
+                except Exception:
+                    job["errors"] += 1
+
+            if job["parents_done"] % 50 == 0:
+                flush_master()
+
+        flush_master()
+        if not job.get("cancel"):
+            job["status"] = "completed"; job["phase"] = "complete"
+        job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
+    except Exception as e:
+        flush_master()
+        job["status"] = "error"; job["error"] = str(e)
+
+
+def undo_tree(master_manifest: str, confirm: bool = False) -> dict:
+    """Undo a whole-tree reconcile by reversing every child manifest in REVERSE
+    order (so deeper structure is restored consistently)."""
+    if not confirm:
+        return {"error": "confirm=true required"}
+    if not os.path.exists(master_manifest):
+        return {"error": "master manifest not found"}
+    with open(master_manifest, encoding="utf-8") as f:
+        master = json.load(f)
+    restored = 0
+    errors = []
+    for mpath in reversed(master.get("child_manifests", [])):
+        try:
+            r = undo(mpath, confirm=True)
+            restored += r.get("restored", 0)
+            errors.extend(r.get("errors", []))
+        except Exception as e:
+            errors.append(f"{mpath}: {e}")
+    return {"restored": restored, "errors_count": len(errors),
+            "errors": errors[:20]}
